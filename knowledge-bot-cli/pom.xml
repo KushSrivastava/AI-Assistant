@@ -42,9 +42,9 @@
  				<artifactId>spring-boot-maven-plugin</artifactId>
  				<configuration>
  					<mainClass>com.knowledgebot.cli.KnowledgeBotCliApplication</mainClass>
- 					<properties>
- 						<spring.main.web-application-type>NONE</spring.main.web-application-type>
- 					</properties>
+<!-- 					<properties>-->
+<!-- 						<spring.main.web-application-type>NONE</spring.main.web-application-type>-->
+<!-- 					</properties>-->
  				</configuration>
  			</plugin>
  		</plugins>
