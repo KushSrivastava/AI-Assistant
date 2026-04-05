@@ -1,0 +1,4 @@
+com\knowledgebot\data\memory\GlobalKnowledgeService.class
+com\knowledgebot\data\config\VectorStoreConfig.class
+com\knowledgebot\data\memory\ConflictResolutionService.class
+com\knowledgebot\data\worklog\WorklogService.class
