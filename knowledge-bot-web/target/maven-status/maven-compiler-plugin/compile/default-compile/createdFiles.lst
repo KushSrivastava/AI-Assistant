@@ -1,0 +1,3 @@
+com\knowledgebot\KnowledgeBotApplication.class
+com\knowledgebot\config\CacheConfig.class
+com\knowledgebot\web\ChatController.class

@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: knowledge-bot-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    # Uncomment deploy block if you have an NVIDIA GPU and configured docker runtime
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  postgres:
+    # You can also use testcontainers during development, but for local run:
+    image: pgvector/pgvector:pg17
+    container_name: knowledge-bot-postgres
+    environment:
+      POSTGRES_USER: kbot
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: knowledgebot
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+  postgres_data:
