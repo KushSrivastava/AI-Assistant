@@ -1,6 +1,9 @@
 spring:
   application:
     name: knowledge-bot
+
+  profiles:
+    active: local
   
   # Enable Virtual Threads (Project Loom)
   threads:
