@@ -22,8 +22,7 @@
 PLAN.md
 
 # ── Environment / secrets ──────────────────────────────────────────
-.env
-.env.*
+application-local.properties
 *.env
 
 # ── OS artifacts ───────────────────────────────────────────────────
