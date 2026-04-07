@@ -1,7 +1,7 @@
 spring:
   application:
     name: knowledge-bot
-  
+
   # Enable Virtual Threads (Project Loom)
   threads:
     virtual:
@@ -28,11 +28,12 @@ spring:
         initialize-schema: true
 
   datasource:
-    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5433}/${DB_NAME:knowledgebot}
-    username: ${DB_USERNAME:kbot}
-    password: ${DB_PASSWORD}
+    # Copy .env.example → .env and set DB_* variables before running.
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5433}/${DB_NAME}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}           # Required — no default for security
     driver-class-name: org.postgresql.Driver
-    
+
   h2:
     console:
       enabled: true
