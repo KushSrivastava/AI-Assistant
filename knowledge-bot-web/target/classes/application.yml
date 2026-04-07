@@ -28,9 +28,9 @@ spring:
         initialize-schema: true
 
   datasource:
-    url: jdbc:postgresql://localhost:5433/knowledgebot
-    username: kbot
-    password: password
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5433}/${DB_NAME:knowledgebot}
+    username: ${DB_USERNAME:kbot}
+    password: ${DB_PASSWORD}
     driver-class-name: org.postgresql.Driver
     
   h2:
