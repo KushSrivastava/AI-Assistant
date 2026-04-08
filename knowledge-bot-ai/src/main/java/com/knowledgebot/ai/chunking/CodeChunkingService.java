@@ -10,8 +10,15 @@ import java.util.List;
 public class CodeChunkingService {
     
     // Chunking files by roughly 800 tokens max with 100 overlap tokens to preserve code context logic
-    private final TokenTextSplitter splitter = new TokenTextSplitter(800, 350, 5, 10000, true);
-    
+
+    private final TokenTextSplitter splitter = TokenTextSplitter.builder()
+            .withChunkSize(800)
+            .withMinChunkSizeChars(350)
+            .withMinChunkLengthToEmbed(5)
+            .withMaxNumChunks(10000)
+            .withKeepSeparator(true)
+            .build();
+
     public List<Document> chunk(Document document) {
         return splitter.apply(List.of(document));
     }
