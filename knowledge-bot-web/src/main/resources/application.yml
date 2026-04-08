@@ -108,3 +108,7 @@ logging:
 server:
   error:
     include-message: always
+
+threads:
+  virtual:
+    enabled: true

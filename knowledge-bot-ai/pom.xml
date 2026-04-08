@@ -8,35 +8,41 @@
 	</parent>
 	<artifactId>knowledge-bot-ai</artifactId>
 	<name>knowledge-bot-ai</name>
- 	<dependencies>
- 		<dependency>
- 			<groupId>com.knowledgebot</groupId>
- 			<artifactId>knowledge-bot-core</artifactId>
- 			<version>${project.version}</version>
- 		</dependency>
- 		<dependency>
- 			<groupId>org.springframework.ai</groupId>
- 			<artifactId>spring-ai-starter-model-ollama</artifactId>
- 			<version>${spring-ai.version}</version>
- 			<exclusions>
- 				<exclusion>
- 					<groupId>org.springframework.boot</groupId>
- 					<artifactId>spring-boot-starter-webflux</artifactId>
- 				</exclusion>
- 			</exclusions>
- 		</dependency>
+	<dependencies>
+		<dependency>
+			<groupId>com.knowledgebot</groupId>
+			<artifactId>knowledge-bot-core</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+
+		<dependency>
+			<groupId>org.springframework.ai</groupId>
+			<artifactId>spring-ai-starter-model-ollama</artifactId>
+			<version>${spring-ai.version}</version>
+		</dependency>
+
+		<dependency>
+			<groupId>org.springframework.ai</groupId>
+			<artifactId>spring-ai-mcp</artifactId>
+		</dependency>
+
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-webflux</artifactId>
+		</dependency>
+
 		<dependency>
 			<groupId>org.springframework.ai</groupId>
 			<artifactId>spring-ai-vector-store</artifactId>
 			<version>${spring-ai.version}</version>
 		</dependency>
- 		<dependency>
- 			<groupId>org.apache.tika</groupId>
- 			<artifactId>tika-core</artifactId>
- 		</dependency>
- 		<dependency>
- 			<groupId>org.apache.tika</groupId>
- 			<artifactId>tika-parsers-standard-package</artifactId>
- 		</dependency>
- 	</dependencies>
+		<dependency>
+			<groupId>org.apache.tika</groupId>
+			<artifactId>tika-core</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.tika</groupId>
+			<artifactId>tika-parsers-standard-package</artifactId>
+		</dependency>
+	</dependencies>
 </project>
