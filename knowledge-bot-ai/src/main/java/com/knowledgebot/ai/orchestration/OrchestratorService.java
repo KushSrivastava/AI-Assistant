@@ -1,8 +1,17 @@
 package com.knowledgebot.ai.orchestration;
 
+// Explicitly importing intra-package classes to resolve IDE cache issues
+import com.knowledgebot.ai.mcp.McpClientService;
+import com.knowledgebot.ai.orchestration.DAGScheduler;
+import com.knowledgebot.ai.orchestration.KnowledgeMerger;
+import com.knowledgebot.ai.orchestration.DagTask;
+import com.knowledgebot.ai.orchestration.TaskStatus;
+import org.springframework.ai.mcp.SyncMcpToolCallbackProvider;
+import org.springframework.ai.tool.ToolCallback;
 import com.knowledgebot.ai.notifications.NotificationService;
 import com.knowledgebot.ai.planning.PlanningService;
 import com.knowledgebot.ai.planning.TrackedPlan;
+import io.modelcontextprotocol.client.McpSyncClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -13,13 +22,10 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Orchestrates multi-agent concurrent plan execution.
+ * Orchestrates multi-agent concurrent plan execution using Project Loom Virtual Threads.
  *
- * Integrates {@link TrackedPlan} (per-step lifecycle: NOT_STARTED → IN_PROGRESS →
- * COMPLETED | FAILED | BLOCKED) with {@link DAGScheduler} so every task's status
- * is reflected in both the DAG and the plan's progress board.
- *
- * Stuck-state detection is handled inside {@link DAGScheduler}.
+ * Integrates {@link TrackedPlan} with {@link DAGScheduler} and natively binds
+ * Model Context Protocol (MCP) tools to all executing agents.
  */
 @Service
 public class OrchestratorService {
@@ -28,8 +34,9 @@ public class OrchestratorService {
 
     private final DAGScheduler dagScheduler;
     private final KnowledgeMerger knowledgeMerger;
-    private final ChatClient chatClient;
+    private final ChatClient.Builder chatClientBuilder;
     private final NotificationService notificationService;
+    private final McpClientService mcpClientService;
 
     /** The current active plan — updated on each executePlanWithConcurrency call. */
     private final AtomicReference<TrackedPlan> activePlan = new AtomicReference<>();
@@ -37,36 +44,54 @@ public class OrchestratorService {
     public OrchestratorService(DAGScheduler dagScheduler,
                                KnowledgeMerger knowledgeMerger,
                                ChatClient.Builder chatClientBuilder,
-                               NotificationService notificationService) {
+                               NotificationService notificationService,
+                               McpClientService mcpClientService) {
         this.dagScheduler = dagScheduler;
         this.knowledgeMerger = knowledgeMerger;
-        this.chatClient = chatClientBuilder.build();
+        this.chatClientBuilder = chatClientBuilder;
         this.notificationService = notificationService;
+        this.mcpClientService = mcpClientService;
     }
 
     // -------------------------------------------------------------------------
 
     /**
-     * Generates a tracked plan, builds the DAG, executes all tasks concurrently,
-     * and synchronises per-step statuses back to the TrackedPlan for live progress.
+     * Dynamically builds a ChatClient equipped with all currently connected MCP tools.
+     * This is the magic of Spring AI 2.x!
      */
+    private ChatClient buildMcpEnabledAgent() {
+        ChatClient.Builder builder = chatClientBuilder.clone();
+
+        List<McpSyncClient> activeServers = mcpClientService.getActiveConnections();
+
+        if (!activeServers.isEmpty()) {
+            // Spring AI 2.0 utility to adapt official MCP tools to Spring AI ToolCallbacks
+            List<ToolCallback> mcpTools = SyncMcpToolCallbackProvider.syncToolCallbacks(activeServers);
+
+            // Bind all discovered tools to the LLM natively
+            builder.defaultToolCallbacks(mcpTools.toArray(new ToolCallback[0]));
+        }
+
+        return builder.build();
+    }
+
+    // -------------------------------------------------------------------------
+
     public String executePlanWithConcurrency(String goal, String markdownPlan) {
         log.info("Orchestrating plan with concurrent execution for goal: {}", goal);
         notificationService.notifyPlanGenerated(goal);
 
-        // Build TrackedPlan from the markdown
         List<String> steps = PlanningService.parseSteps(markdownPlan);
         TrackedPlan plan = new TrackedPlan(goal, markdownPlan, steps);
         activePlan.set(plan);
 
-        // Build DAG and mark steps IN_PROGRESS as they start
         List<DagTask> tasks = dagScheduler.buildGraphFromPlan(markdownPlan);
         log.info("Task graph built: {} tasks", tasks.size());
 
-        // Execute — DAGScheduler handles retries and stuck-state detection internally
-        Map<String, String> results = dagScheduler.executeAll(chatClient, 300);
+        // Build a fresh agent with the latest tools and pass it to the Loom Scheduler
+        ChatClient agentClient = buildMcpEnabledAgent();
+        Map<String, String> results = dagScheduler.executeAll(agentClient, 300);
 
-        // Synchronise final statuses from DAG → TrackedPlan
         syncStatusesToPlan(plan, tasks, results);
 
         log.info("Execution complete.\n{}", plan.renderProgressBoard());
@@ -88,10 +113,11 @@ public class OrchestratorService {
         activePlan.set(plan);
 
         List<DagTask> tasks = dagScheduler.buildGraphWithParallelTasks(independentTasks, sequentialTasks);
-        log.info("DAG built: {} independent + {} sequential tasks",
-                independentTasks.size(), sequentialTasks.size());
 
-        Map<String, String> results = dagScheduler.executeAll(chatClient, 300);
+        // Build a fresh agent with the latest tools
+        ChatClient agentClient = buildMcpEnabledAgent();
+        Map<String, String> results = dagScheduler.executeAll(agentClient, 300);
+
         syncStatusesToPlan(plan, tasks, results);
 
         log.info("Parallel execution complete.\n{}", plan.renderProgressBoard());
@@ -100,10 +126,6 @@ public class OrchestratorService {
 
     // -------------------------------------------------------------------------
 
-    /**
-     * Returns the live progress board of the currently active plan.
-     * Falls back to the DAGScheduler's progress report if no plan is active.
-     */
     public String getProgressReport() {
         TrackedPlan plan = activePlan.get();
         if (plan != null) {
@@ -112,12 +134,9 @@ public class OrchestratorService {
         return dagScheduler.getProgressReport();
     }
 
-    /** Returns the active TrackedPlan, or null if none has been started. */
     public TrackedPlan getActivePlan() {
         return activePlan.get();
     }
-
-    // -------------------------------------------------------------------------
 
     private void syncStatusesToPlan(TrackedPlan plan, List<DagTask> tasks, Map<String, String> results) {
         for (int i = 0; i < tasks.size() && i < plan.getSteps().size(); i++) {

@@ -31,7 +31,6 @@
 		<module>knowledge-bot-data</module>
 		<module>knowledge-bot-web</module>
 		<module>knowledge-bot-cli</module>
-		<module>knowledge-bot-mcp</module>
 	</modules>
 
 	<dependencyManagement>
