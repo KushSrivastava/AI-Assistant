@@ -15,6 +15,20 @@ public class TokenBudgetService {
     private final AtomicLong sessionTokens = new AtomicLong(0);
     private volatile long sessionBudget = 50000;
     private volatile boolean circuitOpen = false;
+    private final HardwareMetricsService hardwareMetrics;
+    private static final int DEFAULT_MAX_TOKENS = 32000;
+
+    public TokenBudgetService(HardwareMetricsService hardwareMetrics) {
+        this.hardwareMetrics = hardwareMetrics;
+    }
+
+    public int getAllocatedContextWindow() {
+        if (hardwareMetrics.isRamCritical()) {
+            // Save memory during intensive operations
+            return DEFAULT_MAX_TOKENS / 2;
+        }
+        return DEFAULT_MAX_TOKENS;
+    }
 
     public long estimateTokens(String text) {
         if (text == null || text.isEmpty()) return 0;

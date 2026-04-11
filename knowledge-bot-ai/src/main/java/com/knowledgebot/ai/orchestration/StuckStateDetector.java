@@ -1,23 +1,29 @@
 package com.knowledgebot.ai.orchestration;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Detects when an agent loop is stuck by maintaining a ring buffer of the last N
  * task results and checking whether they are all identical (or near-identical).
  *
- * Based on the stuck-state detection pattern from OpenManus.
+ * Upgraded for Phase 5: Now maintains a conversational trace buffer to
+ * export "Correction Triumphs" for Supervised Fine-Tuning.
  */
 public class StuckStateDetector {
 
     private static final int DEFAULT_WINDOW = 4;
-
-    /** Minimum Levenshtein-similarity ratio to consider two strings "the same". */
     private static final double SIMILARITY_THRESHOLD = 0.90;
 
     private final int windowSize;
     private final Deque<String> recentResults;
+
+    // --- Phase 5: SFT Dataset Buffer ---
+    private final List<Map<String, String>> conversationHistory = new ArrayList<>();
 
     public StuckStateDetector() {
         this(DEFAULT_WINDOW);
@@ -26,14 +32,56 @@ public class StuckStateDetector {
     public StuckStateDetector(int windowSize) {
         this.windowSize = windowSize;
         this.recentResults = new ArrayDeque<>(windowSize);
+
+        // Phase 5: Initialize the fine-tuning dataset with the System Prompt
+        Map<String, String> sysMsg = new HashMap<>();
+        sysMsg.put("role", "system");
+        sysMsg.put("content", "You are an autonomous AI executing a specific software task. Follow instructions strictly and correct yourself if you fail.");
+        conversationHistory.add(sysMsg);
+    }
+
+    // ========================================================================
+    // NEW PHASE 5 METHODS (Data Loop & Experience Tracking)
+    // ========================================================================
+
+    /**
+     * Records the execution attempt for the SFT dataset, then uses the existing
+     * fuzzy-matching logic to determine if the agent is stuck.
+     */
+    public boolean recordAttempt(String prompt, String result) {
+        // Track the user prompt
+        Map<String, String> userMsg = new HashMap<>();
+        userMsg.put("role", "user");
+        userMsg.put("content", prompt);
+        conversationHistory.add(userMsg);
+
+        // Track the LLM response
+        Map<String, String> assistantMsg = new HashMap<>();
+        assistantMsg.put("role", "assistant");
+        assistantMsg.put("content", result);
+        conversationHistory.add(assistantMsg);
+
+        // Delegate to original Levenshtein logic to determine stuck state
+        return record(result);
     }
 
     /**
-     * Record the latest result and check whether the detector considers the agent stuck.
-     *
-     * @param result the latest task/step output
-     * @return {@code true} if the last {@code windowSize} outputs are all near-identical
+     * A "Correction Triumph" occurs when the agent fails on Attempt 1,
+     * gets corrected, and succeeds on Attempt 2 or 3.
      */
+    public boolean isCorrectionTriumph() {
+        // If history > 3 items (Sys + User + Asst), multiple attempts occurred!
+        return conversationHistory.size() > 3;
+    }
+
+    public List<Map<String, String>> getDatasetMessages() {
+        return conversationHistory;
+    }
+
+    // ========================================================================
+    // ORIGINAL METHODS PRESERVED BELOW (Fuzzy Matching & Ring Buffer)
+    // ========================================================================
+
     public boolean record(String result) {
         if (recentResults.size() >= windowSize) {
             recentResults.pollFirst();
@@ -42,10 +90,9 @@ public class StuckStateDetector {
         return isStuck();
     }
 
-    /** Returns {@code true} without recording a new result. */
     public boolean isStuck() {
         if (recentResults.size() < windowSize) {
-            return false; // not enough data yet
+            return false;
         }
         String reference = recentResults.peekFirst();
         return recentResults.stream()
@@ -56,18 +103,11 @@ public class StuckStateDetector {
         recentResults.clear();
     }
 
-    // -------------------------------------------------------------------------
-
-    /** Lower-case, strip whitespace runs → canonical form for comparison. */
     private static String normalise(String s) {
         if (s == null) return "";
         return s.toLowerCase().replaceAll("\\s+", " ").trim();
     }
 
-    /**
-     * Normalised Levenshtein similarity: 1 - (editDistance / maxLength).
-     * Returns 1.0 for identical strings, 0.0 for completely different strings.
-     */
     static double similarity(String a, String b) {
         if (a == null || b == null) return 0.0;
         if (a.equals(b)) return 1.0;
@@ -77,7 +117,6 @@ public class StuckStateDetector {
     }
 
     private static int editDistance(String a, String b) {
-        // Use only two rows to keep memory O(min(m,n))
         if (a.length() < b.length()) { String tmp = a; a = b; b = tmp; }
         int[] prev = new int[b.length() + 1];
         int[] curr = new int[b.length() + 1];

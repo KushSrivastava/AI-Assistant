@@ -1,5 +1,6 @@
 package com.knowledgebot.ai.retrieval;
 
+import com.knowledgebot.core.performance.HardwareMetricsService;
 import com.knowledgebot.core.performance.TokenBudgetService;
 import com.knowledgebot.core.scanner.FuzzySearchService;
 import com.knowledgebot.core.scanner.MentionParser;
@@ -24,12 +25,15 @@ public class RetrievalService {
     private final MentionParser mentionParser;
     private final FuzzySearchService fuzzySearchService;
     private final TokenBudgetService tokenBudgetService;
+    private final HardwareMetricsService hardwareMetrics;
+    private static final int DEFAULT_MAX_TOKENS = 32000;
 
-    public RetrievalService(VectorStore vectorStore, MentionParser mentionParser, FuzzySearchService fuzzySearchService, TokenBudgetService tokenBudgetService) {
+    public RetrievalService(VectorStore vectorStore, MentionParser mentionParser, FuzzySearchService fuzzySearchService, TokenBudgetService tokenBudgetService, HardwareMetricsService hardwareMetrics) {
         this.vectorStore = vectorStore;
         this.mentionParser = mentionParser;
         this.fuzzySearchService = fuzzySearchService;
         this.tokenBudgetService = tokenBudgetService;
+        this.hardwareMetrics = hardwareMetrics;
     }
 
     public List<Document> search(String query, int topK) {
