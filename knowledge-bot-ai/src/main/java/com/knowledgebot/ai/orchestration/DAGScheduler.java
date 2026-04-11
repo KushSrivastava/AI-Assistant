@@ -1,37 +1,36 @@
 package com.knowledgebot.ai.orchestration;
 
+import com.knowledgebot.ai.orchestration.events.OrchestrationEvent.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-
-// Stuck-state detection: max retries per task before giving up
-
 
 @Service
 public class DAGScheduler {
 
     private static final Logger log = LoggerFactory.getLogger(DAGScheduler.class);
     private static final Pattern TASK_LINE = Pattern.compile("^\\d+\\.\\s*\\[.*?]\\s*(.+)$", Pattern.MULTILINE);
-    private static final int MAX_RETRIES_PER_TASK = 3;
 
-    private final List<DagTask> taskGraph = new ArrayList<>();
-    private final Map<String, String> taskResults = new ConcurrentHashMap<>();
-    // Per-task stuck-state detectors, keyed by task ID
-    private final Map<String, StuckStateDetector> detectors = new ConcurrentHashMap<>();
+    private final ApplicationEventPublisher eventPublisher;
+    private final Map<String, PlanExecutionState> activePlans = new ConcurrentHashMap<>();
+
+    public DAGScheduler(ApplicationEventPublisher eventPublisher) {
+        this.eventPublisher = eventPublisher;
+    }
+
+    // --- Graph Building Methods (Restored) ---
 
     public List<DagTask> buildGraphFromPlan(String markdownPlan) {
-        taskGraph.clear();
-        detectors.clear();
+        List<DagTask> taskGraph = new ArrayList<>();
         Matcher matcher = TASK_LINE.matcher(markdownPlan);
         int index = 0;
         while (matcher.find()) {
@@ -42,12 +41,11 @@ public class DAGScheduler {
             index++;
         }
         log.info("Built DAG with {} tasks from plan", taskGraph.size());
-        return List.copyOf(taskGraph);
+        return taskGraph;
     }
 
     public List<DagTask> buildGraphWithParallelTasks(List<String> independentTasks, List<String> sequentialTasks) {
-        taskGraph.clear();
-        detectors.clear();
+        List<DagTask> taskGraph = new ArrayList<>();
         int index = 0;
 
         for (String task : independentTasks) {
@@ -68,126 +66,106 @@ public class DAGScheduler {
         }
 
         log.info("Built DAG with {} tasks ({} independent, {} sequential)", taskGraph.size(), independentTasks.size(), sequentialTasks.size());
-        return List.copyOf(taskGraph);
+        return taskGraph;
     }
 
-    public Map<String, String> executeAll(ChatClient chatClient, long timeoutSeconds) {
-        CountDownLatch latch = new CountDownLatch(taskGraph.size());
+    // --- Event Driven Execution Logic ---
 
-        for (DagTask task : taskGraph) {
-            Thread.startVirtualThread(() -> {
-                try {
-                    waitForDependencies(task);
-                    if (task.hasFailedDependencies(taskGraph)) {
-                        task.status().set(TaskStatus.BLOCKED);
-                        log.warn("Task {} blocked due to failed dependencies", task.id());
-                        return;
-                    }
-                    executeTask(task, chatClient);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    task.status().set(TaskStatus.FAILED);
-                    log.error("Task {} interrupted: {}", task.id(), e.getMessage());
-                } finally {
-                    latch.countDown();
-                }
-            });
+    public void startPlanExecution(String planId, List<DagTask> taskGraph) {
+        log.info("Starting execution for plan {} with {} tasks", planId, taskGraph.size());
+
+        PlanExecutionState state = new PlanExecutionState(taskGraph);
+        activePlans.put(planId, state);
+
+        taskGraph.stream()
+                .filter(task -> task.dependencies().isEmpty())
+                .forEach(task -> {
+                    task.status().set(TaskStatus.READY);
+                    eventPublisher.publishEvent(new TaskReadyEvent(planId, task));
+                });
+    }
+
+    @EventListener
+    public void onTaskStarted(TaskStartedEvent event) {
+        PlanExecutionState state = activePlans.get(event.planId());
+        if (state != null) {
+            state.getTask(event.taskId()).status().set(TaskStatus.EXECUTING);
         }
+    }
 
-        try {
-            boolean completed = latch.await(timeoutSeconds, TimeUnit.SECONDS);
-            if (!completed) {
-                log.warn("DAG execution timed out after {} seconds", timeoutSeconds);
+    @EventListener
+    public void onTaskCompleted(TaskCompletedEvent event) {
+        PlanExecutionState state = activePlans.get(event.planId());
+        if (state == null) return;
+
+        DagTask task = state.getTask(event.taskId());
+        task.status().set(TaskStatus.COMPLETED);
+        task.result().set(event.result());
+        state.addResult(event.taskId(), event.result());
+
+        checkDownstreamDependencies(event.planId(), state);
+        checkPlanCompletion(event.planId(), state);
+    }
+
+    @EventListener
+    public void onTaskFailed(TaskFailedEvent event) {
+        PlanExecutionState state = activePlans.get(event.planId());
+        if (state == null) return;
+
+        DagTask task = state.getTask(event.taskId());
+        task.status().set(TaskStatus.FAILED);
+        task.result().set(event.error());
+
+        state.getAllTasks().forEach(t -> {
+            if (t.hasFailedDependencies(state.getAllTasks())) {
+                t.status().set(TaskStatus.BLOCKED);
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.error("DAG execution interrupted");
-        }
+        });
 
-        for (DagTask task : taskGraph) {
-            taskResults.put(task.id(), task.result().get());
-        }
-
-        return Map.copyOf(taskResults);
+        checkPlanCompletion(event.planId(), state);
     }
 
-    private void waitForDependencies(DagTask task) throws InterruptedException {
-        while (!task.isReady(taskGraph)) {
-            if (task.hasFailedDependencies(taskGraph)) return;
-            Thread.sleep(100);
-        }
+    private void checkDownstreamDependencies(String planId, PlanExecutionState state) {
+        state.getAllTasks().stream()
+                .filter(t -> t.status().get() == TaskStatus.PENDING)
+                .filter(t -> t.isReady(state.getAllTasks()))
+                .forEach(t -> {
+                    t.status().set(TaskStatus.READY);
+                    eventPublisher.publishEvent(new TaskReadyEvent(planId, t));
+                });
     }
 
-    private void executeTask(DagTask task, ChatClient chatClient) {
-        task.status().set(TaskStatus.EXECUTING);
-        log.info("Executing task {}: {}", task.id(), task.description());
+    private void checkPlanCompletion(String planId, PlanExecutionState state) {
+        boolean allTerminal = state.getAllTasks().stream().allMatch(t -> {
+            TaskStatus status = t.status().get();
+            return status == TaskStatus.COMPLETED || status == TaskStatus.FAILED || status == TaskStatus.BLOCKED;
+        });
 
-        StuckStateDetector detector = detectors.computeIfAbsent(task.id(), k -> new StuckStateDetector());
-
-        for (int attempt = 1; attempt <= MAX_RETRIES_PER_TASK; attempt++) {
-            try {
-                String prompt = buildPrompt(task.description(), attempt);
-                String result = chatClient.prompt().user(prompt).call().content();
-
-                if (detector.record(result)) {
-                    // Stuck: last N outputs were near-identical — inject recovery strategy
-                    log.warn("Task {} is STUCK after {} attempts. Injecting recovery prompt.", task.id(), attempt);
-                    if (attempt < MAX_RETRIES_PER_TASK) {
-                        log.info("Retrying task {} with recovery prompt...", task.id());
-                        continue;  // next iteration will use buildPrompt with attempt > 1
-                    }
-                    // Exhausted retries — still stuck
-                    task.result().set("[STUCK DETECTION] Task produced identical outputs " +
-                            MAX_RETRIES_PER_TASK + " times. Last output:\n" + result);
-                    task.status().set(TaskStatus.FAILED);
-                    return;
-                }
-
-                task.result().set(result);
-                task.status().set(TaskStatus.COMPLETED);
-                log.info("Task {} completed on attempt {}", task.id(), attempt);
-                return;
-
-            } catch (Exception e) {
-                log.error("Task {} attempt {} failed: {}", task.id(), attempt, e.getMessage());
-                if (attempt == MAX_RETRIES_PER_TASK) {
-                    task.result().set("Error after " + attempt + " attempts: " + e.getMessage());
-                    task.status().set(TaskStatus.FAILED);
-                }
-            }
+        if (allTerminal) {
+            log.info("Plan {} has reached terminal state.", planId);
+            eventPublisher.publishEvent(new PlanCompletedEvent(planId, state.getResults()));
+            activePlans.remove(planId);
         }
     }
 
-    private static String buildPrompt(String description, int attempt) {
-        if (attempt == 1) {
-            return "Execute the following task. Provide a detailed, actionable result:\n\nTask: " + description;
+    private static class PlanExecutionState {
+        private final List<DagTask> tasks;
+        private final Map<String, String> results = new ConcurrentHashMap<>();
+
+        public PlanExecutionState(List<DagTask> tasks) {
+            this.tasks = tasks;
         }
-        // Recovery prompt — change strategy explicitly
-        return """
-            PREVIOUS ATTEMPTS PRODUCED IDENTICAL RESULTS — CHANGE YOUR STRATEGY.
-            Try a completely different approach or break the task into smaller sub-steps.
 
-            Task: %s
+        public List<DagTask> getAllTasks() { return tasks; }
 
-            Requirements:
-            - Do NOT repeat your previous answer.
-            - Think step-by-step.
-            - If blocked, state what is blocking you and propose an alternative.
-            """.formatted(description);
-    }
+        public DagTask getTask(String taskId) {
+            return tasks.stream().filter(t -> t.id().equals(taskId)).findFirst().orElseThrow();
+        }
 
-    public List<DagTask> getTaskGraph() {
-        return List.copyOf(taskGraph);
-    }
+        public void addResult(String taskId, String result) {
+            results.put(taskId, result);
+        }
 
-    public String getProgressReport() {
-        long total = taskGraph.size();
-        long completed = taskGraph.stream().filter(t -> t.status().get() == TaskStatus.COMPLETED).count();
-        long failed = taskGraph.stream().filter(t -> t.status().get() == TaskStatus.FAILED).count();
-        long executing = taskGraph.stream().filter(t -> t.status().get() == TaskStatus.EXECUTING).count();
-        long pending = taskGraph.stream().filter(t -> t.status().get() == TaskStatus.PENDING).count();
-
-        return String.format("Progress: %d/%d completed | %d executing | %d pending | %d failed",
-                completed, total, executing, pending, failed);
+        public Map<String, String> getResults() { return results; }
     }
 }
