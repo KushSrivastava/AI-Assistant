@@ -43,6 +43,28 @@ public class WorkspaceManager {
         return workspace.resolve(relativePath).toAbsolutePath().normalize();
     }
 
+    /**
+     * Centralised sandbox boundary enforcement.
+     *
+     * WHY: Every file-system tool must call this before any I/O operation.
+     * Having it in one place means future security improvements (e.g., allowlists)
+     * only need to be made here — not in every tool class.
+     *
+     * @throws SecurityException if the path is outside the workspace or no workspace is set
+     */
+    public void validatePathInWorkspace(Path path) {
+        Path workspace = activeWorkspace.get();
+        if (workspace == null) {
+            throw new SecurityException("No workspace attached. Attach a workspace before performing file operations.");
+        }
+        Path resolved = path.toAbsolutePath().normalize();
+        if (!resolved.startsWith(workspace)) {
+            throw new SecurityException(
+                "Access denied: '" + resolved + "' is outside the workspace boundary '" + workspace + "'. "
+                + "All file operations must stay within the attached workspace.");
+        }
+    }
+
     public void detach() {
         activeWorkspace.set(null);
         log.info("Workspace detached");
