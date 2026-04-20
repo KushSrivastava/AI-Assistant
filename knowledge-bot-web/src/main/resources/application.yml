@@ -4,7 +4,7 @@ spring:
 
   profiles:
     active: local
-  
+
   # Enable Virtual Threads (Project Loom)
   threads:
     virtual:
@@ -30,73 +30,88 @@ spring:
         schema-name: public
         initialize-schema: true
 
+  # Datasource — defaults so the app doesn't crash if .env is missing
   datasource:
-    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5433}/${DB_NAME}
-    username: ${DB_USERNAME}
-    password: ${DB_PASSWORD}
+    url: jdbc:postgresql://localhost:5433/knowledgebot
+    username: postgres
+    password: password
     driver-class-name: org.postgresql.Driver
-    
+
   h2:
     console:
       enabled: true
 
 # Dynamic Model Routing Configuration
+# WHY: Using a clean map structure so adding a new model only requires
+# a new YAML entry — no Java code changes needed.
 knowledge-bot:
   model-routing:
     default-model-key: local-fast
     fallback-model-key: local-fallback
     auto-failover: true
     request-timeout-ms: 30000
-    local-fast-provider: OLLAMA
-    local-fast-model: llama3.2:3b
-    local-fast-min: SIMPLE
-    local-fast-max: SIMPLE
-    local-fast-cost: 0.0
-    local-fast-tokens: 32000
-    local-fast-purpose: "Fast local responses, summaries, simple Q&A"
-    local-fast-context: 8192
-    local-fast-budget: 4000
-    local-code-provider: OLLAMA
-    local-code-model: llama3.2:3b
-    local-code-min: SIMPLE
-    local-code-max: MODERATE
-    local-code-cost: 0.0
-    local-code-tokens: 32000
-    local-code-purpose: "Fast local code assistance, refactoring"
-    local-code-context: 8192
-    local-code-budget: 4000
-    local-fallback-provider: OLLAMA
-    local-fallback-model: llama3.2:3b
-    local-fallback-min: SIMPLE
-    local-fallback-max: REASONING_HEAVY
-    local-fallback-cost: 0.0
-    local-fallback-tokens: 32000
-    local-fallback-purpose: "Fallback when primary local models are unavailable"
-    local-fallback-context: 8192
-    local-fallback-budget: 4000
-    advanced-reasoning-provider: OLLAMA
-    advanced-reasoning-model: llama3.2:3b
-    advanced-reasoning-min: COMPLEX
-    advanced-reasoning-max: REASONING_HEAVY
-    advanced-reasoning-cost: 0.0
-    advanced-reasoning-tokens: 32000
-    advanced-reasoning-purpose: "Multi-step planning and reasoning"
-    advanced-reasoning-context: 8192
-    advanced-reasoning-budget: 4000
-    advanced-creative-provider: OLLAMA
-    advanced-creative-model: llama3.2:3b
-    advanced-creative-min: MODERATE
-    advanced-creative-max: REASONING_HEAVY
-    advanced-creative-cost: 0.0
-    advanced-creative-tokens: 32000
-    advanced-creative-purpose: "Creative tasks and detailed analysis"
-    advanced-creative-context: 8192
-    advanced-creative-budget: 4000
+    models:
+      local-fast:
+        provider: OLLAMA
+        model: llama3.2:3b
+        min-complexity: SIMPLE
+        max-complexity: SIMPLE
+        cost: 0.0
+        max-tokens: 32000
+        context-window: 8192
+        prompt-budget: 4000
+        purpose: "Fast local responses, summaries, simple Q&A"
+      local-code:
+        provider: OLLAMA
+        model: llama3.2:3b
+        min-complexity: SIMPLE
+        max-complexity: MODERATE
+        cost: 0.0
+        max-tokens: 32000
+        context-window: 8192
+        prompt-budget: 4000
+        purpose: "Code generation & refactoring"
+      local-fallback:
+        provider: OLLAMA
+        model: llama3.2:3b
+        min-complexity: SIMPLE
+        max-complexity: REASONING_HEAVY
+        cost: 0.0
+        max-tokens: 32000
+        context-window: 8192
+        prompt-budget: 4000
+        purpose: "Fallback when primary local models are unavailable"
+      advanced-reasoning:
+        provider: OLLAMA
+        model: llama3.2:3b
+        min-complexity: COMPLEX
+        max-complexity: REASONING_HEAVY
+        cost: 0.0
+        max-tokens: 32000
+        context-window: 8192
+        prompt-budget: 4000
+        purpose: "Multi-step planning and reasoning"
+      advanced-creative:
+        provider: OLLAMA
+        model: llama3.2:3b
+        min-complexity: MODERATE
+        max-complexity: REASONING_HEAVY
+        cost: 0.0
+        max-tokens: 32000
+        context-window: 8192
+        prompt-budget: 4000
+        purpose: "Creative tasks and detailed analysis"
+
   notifications:
     discord-webhook: ${DISCORD_WEBHOOK_URL:}
     telegram-bot-token: ${TELEGRAM_BOT_TOKEN:}
     telegram-chat-id: ${TELEGRAM_CHAT_ID:}
     webhook-url: ${GENERIC_WEBHOOK_URL:}
+
+  knowledge:
+    base-path: ${KNOWLEDGE_BASE_PATH:${user.home}/.agentmanager/knowledge}
+    watch-enabled: true
+    supported-formats: pdf,docx,doc,txt,md,csv,json,xml,yaml,yml
 
 # Logging configuration
 logging:

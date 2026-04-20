@@ -1,0 +1,2059 @@
+# 🏗️ Agentic AI Co-Worker — Complete Implementation Plan
+
+> **Project**: Transform `knowledge-bot` into an autonomous AI coding assistant
+> **Target Audience**: Junior developer who can follow step-by-step
+> **Tech Stack**: Java 21, Spring Boot 4.0, Spring AI 2.0, Ollama, PgVector, Vite + React (UI)
+> **Estimated Duration**: 8–12 weeks (solo developer)
+
+---
+
+## Table of Contents
+
+| Phase | Name | Duration | Description |
+|-------|------|----------|-------------|
+| 0 | [Cleanup & Stabilization](#phase-0-cleanup--stabilization) | 3 days | Fix broken code, add tests, refactor god-classes |
+| 1 | [The Agentic Tool-Calling Loop](#phase-1-the-agentic-tool-calling-loop) | 5 days | The core brain — LLM decides what tools to use |
+| 2 | [Conversation Memory](#phase-2-conversation-memory) | 3 days | Session + persistent memory so the bot remembers |
+| 3 | [Knowledge Base & Document Ingestion](#phase-3-knowledge-base--document-ingestion) | 4 days | Upload docs, the bot reads them before working |
+| 4 | [Web Search & Internet Access](#phase-4-web-search--internet-access) | 2 days | The bot can Google things and learn |
+| 5 | [File System Tools & Sandbox](#phase-5-file-system-tools--sandbox) | 3 days | Read, write, create files/folders within the workspace |
+| 6 | [Architect Mode: HLD → LLD → Code](#phase-6-architect-mode-hld--lld--code) | 5 days | Plan architecture, then implement it |
+| 7 | [Code Validation & Reflection Loop](#phase-7-code-validation--reflection-loop) | 4 days | Build, test, fix in a loop until it works |
+| 8 | [Startup Flow & Folder Permission](#phase-8-startup-flow--folder-permission) | 2 days | Mandatory folder picker popup on startup |
+| 9 | [UI Overhaul — Agent Manager](#phase-9-ui-overhaul--agent-manager) | 7 days | Antigravity-inspired chat UI with agent visualization |
+| 10 | [IDE Integration](#phase-10-ide-integration) | 2 days | Open files in IntelliJ or VS Code |
+| 11 | [End-to-End Integration & Polish](#phase-11-end-to-end-integration--polish) | 4 days | Wire everything, test every flow, fix bugs |
+
+---
+
+## Phase 0: Cleanup & Stabilization
+
+> **Goal**: Make the existing code buildable, testable, and maintainable before adding anything new.
+
+### Step 0.1 — Refactor `ModelRegistry` (Kill the 60+ `@Value` Fields)
+
+**Why**: The current `ModelRegistry.java` has 60+ individual `@Value` annotations. This is unmaintainable. Spring Boot has `@ConfigurationProperties` for exactly this.
+
+**What to do**:
+
+1. Create a new file `knowledge-bot-ai/src/main/java/com/knowledgebot/ai/model/ModelRoutingProperties.java`:
+
+```java
+package com.knowledgebot.ai.model;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import java.util.Map;
+
+/**
+ * WHY: Instead of 60+ @Value fields, we bind the entire YAML section
+ * "knowledge-bot.model-routing" to this single POJO.
+ *
+ * HOW IT WORKS: Spring Boot reads the YAML and automatically maps
+ * nested keys to these fields. For example:
+ *   knowledge-bot.model-routing.default-model-key: local-fast
+ * gets mapped to this.defaultModelKey
+ */
+@ConfigurationProperties(prefix = "knowledge-bot.model-routing")
+public class ModelRoutingProperties {
+
+    private String defaultModelKey = "local-fast";
+    private String fallbackModelKey = "local-fallback";
+    private boolean autoFailover = true;
+    private long requestTimeoutMs = 30000;
+
+    /**
+     * Each entry in the map represents one model configuration.
+     * In YAML it looks like:
+     *   knowledge-bot.model-routing.models:
+     *     local-fast:
+     *       provider: OLLAMA
+     *       model: llama3.2:3b
+     *       min-complexity: SIMPLE
+     *       ...
+     */
+    private Map<String, ModelConfig> models;
+
+    // Getters + Setters for all fields (generate with IDE)
+
+    public static class ModelConfig {
+        private String provider = "OLLAMA";
+        private String model;
+        private String minComplexity = "SIMPLE";
+        private String maxComplexity = "MODERATE";
+        private double cost = 0.0;
+        private double maxTokens = 32000;
+        private int contextWindow = 8192;
+        private int promptBudget = 4000;
+        private String purpose = "";
+        // Getters + Setters
+    }
+}
+```
+
+2. Update `application.yml` to use a cleaner map structure:
+
+```yaml
+knowledge-bot:
+  model-routing:
+    default-model-key: local-fast
+    fallback-model-key: local-fallback
+    auto-failover: true
+    request-timeout-ms: 30000
+    models:
+      local-fast:
+        provider: OLLAMA
+        model: llama3.2:3b
+        min-complexity: SIMPLE
+        max-complexity: SIMPLE
+        cost: 0.0
+        max-tokens: 32000
+        context-window: 8192
+        prompt-budget: 4000
+        purpose: "Fast local responses, summaries, simple Q&A"
+      local-code:
+        provider: OLLAMA
+        model: deepseek-coder-v2:16b
+        min-complexity: SIMPLE
+        max-complexity: MODERATE
+        cost: 0.0
+        max-tokens: 32000
+        context-window: 32768
+        prompt-budget: 16000
+        purpose: "Code generation & refactoring"
+```
+
+3. Rewrite `ModelRegistry.java` to use the new properties (reduce from 190 lines to ~50).
+
+4. Add `@EnableConfigurationProperties(ModelRoutingProperties.class)` to `KnowledgeBotApplication.java`.
+
+### Step 0.2 — Split `KnowledgeBotCommands` God Class
+
+**Why**: 429 lines with 20+ constructor injections is a maintenance nightmare.
+
+**What to do**: Create separate shell components grouped by domain:
+
+| New Class | Commands It Gets |
+|-----------|-----------------|
+| `ChatCommands.java` | `chat`, `scan` |
+| `PlanCommands.java` | `plan`, `plan-status`, `orchestrate`, `progress` |
+| `CodeCommands.java` | `generate`, `modernize`, `migrate-gen` |
+| `DevOpsCommands.java` | `deploy-docker`, `deploy-terraform`, `deploy-cicd`, `deploy-k8s`, `deploy-full` |
+| `SystemCommands.java` | `status`, `set-mode`, `safe-mode`, `attach-workspace`, `watch`, `watch-stop`, `watch-status` |
+| `GitHubCommands.java` | `github-pr`, `github-ci-status`, `github-token` |
+
+Each gets only the injections it needs.
+
+### Step 0.3 — Populate `knowledge-bot-common` Module
+
+**Why**: It's currently empty. Put shared DTOs/records here.
+
+Create these shared types:
+```java
+// knowledge-bot-common/src/main/java/com/knowledgebot/common/dto/
+public record AgentMessage(String role, String content, long timestamp) {}
+public record ToolCall(String toolName, Map<String, Object> arguments) {}
+public record ToolResult(String toolName, boolean success, String output) {}
+public record ConversationTurn(AgentMessage userMessage, AgentMessage assistantMessage, List<ToolCall> toolCalls) {}
+```
+
+### Step 0.4 — Add Unit Tests for Existing Services
+
+**Why**: Zero tests means zero trust.
+
+Create test files under `src/test/java/` in each module. Start with:
+
+1. `StuckStateDetectorTest.java` — test the Levenshtein similarity
+2. `IntentClassifierTest.java` — test keyword classification
+3. `TokenBudgetServiceTest.java` — test token estimation
+4. `WorkspaceManagerTest.java` — test attach/resolve/detach
+5. `PlanningServiceTest.java` — test markdown parsing
+
+```java
+// Example: StuckStateDetectorTest.java
+@Test
+void shouldDetectStuckWhenAllOutputsIdentical() {
+    StuckStateDetector detector = new StuckStateDetector(3);
+    detector.record("same output");
+    detector.record("same output");
+    assertFalse(detector.isStuck()); // window not full yet
+    detector.record("same output");
+    assertTrue(detector.isStuck()); // now it is
+}
+
+@Test
+void shouldNotDetectStuckWhenOutputsVary() {
+    StuckStateDetector detector = new StuckStateDetector(3);
+    detector.record("output A");
+    detector.record("completely different output B");
+    detector.record("yet another output C");
+    assertFalse(detector.isStuck());
+}
+```
+
+### Step 0.5 — Add `.env.example` and Fix Startup
+
+Create `d:\Agent - assistant\.env.example`:
+```env
+DB_HOST=localhost
+DB_PORT=5433
+DB_NAME=knowledgebot
+DB_USERNAME=postgres
+DB_PASSWORD=changeme
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=changeme
+POSTGRES_DB=knowledgebot
+```
+
+Add to `application.yml` — default values so it doesn't crash:
+```yaml
+spring:
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5433}/${DB_NAME:knowledgebot}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:changeme}
+```
+
+> **✅ Checkpoint**: After Phase 0, the project builds cleanly with `mvn clean install`, has ~15 unit tests passing, and no god-classes.
+
+---
+
+## Phase 1: The Agentic Tool-Calling Loop
+
+> **Goal**: This is THE most important phase. After this, the LLM can autonomously decide to read files, write code, run commands — without the user typing separate CLI commands.
+
+### What Is an Agentic Loop?
+
+Currently: User types `generate code for X` → bot calls LLM once → returns text.
+
+After this phase: User types `Build a REST API` → bot calls LLM → LLM decides to:
+1. First call `list_directory` to see the project structure
+2. Then call `read_file` to read pom.xml
+3. Then call `write_file` to create Controller.java
+4. Then call `write_file` to create Service.java
+5. Then call `run_command` to run `mvn compile`
+6. See an error → call `read_file` on the failed file
+7. Call `write_file` to fix it
+8. Call `run_command` again → success
+
+The LLM **decides** which tools to call. The code just provides the tools and the loop.
+
+### Step 1.1 — Define Tool Interfaces with Spring AI `@Tool`
+
+Spring AI 2.0 has `@Tool` annotation. Create these tool classes:
+
+**File**: `knowledge-bot-ai/src/main/java/com/knowledgebot/ai/tools/FileReadTool.java`
+
+```java
+package com.knowledgebot.ai.tools;
+
+import com.knowledgebot.ai.model.WorkspaceManager;
+import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.tool.annotation.ToolParam;
+import org.springframework.stereotype.Component;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+/**
+ * WHY: The LLM needs to read files in the workspace to understand the project.
+ *
+ * HOW: When the LLM decides it needs to read a file, Spring AI automatically
+ * calls this method, passes the arguments the LLM chose, and returns the
+ * result back to the LLM as a tool response.
+ */
+@Component
+public class FileReadTool {
+
+    private final WorkspaceManager workspaceManager;
+
+    public FileReadTool(WorkspaceManager workspaceManager) {
+        this.workspaceManager = workspaceManager;
+    }
+
+    @Tool(description = "Read the contents of a file in the workspace. Use this to understand existing code, configs, or any file before making changes.")
+    public String readFile(
+        @ToolParam(description = "Relative path to the file within the workspace, e.g. 'src/main/java/App.java'") String path
+    ) {
+        try {
+            Path fullPath = workspaceManager.resolve(path);
+
+            // SECURITY: Make sure the path is inside the workspace
+            if (!fullPath.startsWith(workspaceManager.getActiveWorkspace())) {
+                return "ERROR: Path is outside the workspace boundary. Access denied.";
+            }
+
+            if (!Files.exists(fullPath)) {
+                return "ERROR: File not found: " + path;
+            }
+
+            String content = Files.readString(fullPath);
+            // Truncate if too large (prevent context overflow)
+            if (content.length() > 50000) {
+                return content.substring(0, 50000) + "\n\n... [TRUNCATED - file too large, showing first 50000 chars]";
+            }
+            return content;
+        } catch (Exception e) {
+            return "ERROR reading file: " + e.getMessage();
+        }
+    }
+}
+```
+
+**File**: `knowledge-bot-ai/src/main/java/com/knowledgebot/ai/tools/FileWriteTool.java`
+
+```java
+@Component
+public class FileWriteTool {
+
+    private final WorkspaceManager workspaceManager;
+    private final CommandPermissionService permissionService;
+
+    // Constructor injection...
+
+    @Tool(description = "Write content to a file in the workspace. Creates parent directories if needed. Use this to create new files or overwrite existing ones.")
+    public String writeFile(
+        @ToolParam(description = "Relative path for the file, e.g. 'src/main/java/com/example/UserController.java'") String path,
+        @ToolParam(description = "The complete file content to write") String content
+    ) {
+        try {
+            Path fullPath = workspaceManager.resolve(path);
+
+            // SECURITY: Sandbox check
+            if (!fullPath.startsWith(workspaceManager.getActiveWorkspace())) {
+                return "ERROR: Path is outside workspace. Access denied.";
+            }
+
+            // PERMISSION: Ask user if safe mode is on
+            if (!permissionService.requestPermission("Write file: " + path)) {
+                return "ERROR: User denied permission to write file.";
+            }
+
+            // Create parent directories if they don't exist
+            Path parent = fullPath.getParent();
+            if (parent != null && !Files.exists(parent)) {
+                Files.createDirectories(parent);
+            }
+
+            Files.writeString(fullPath, content,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING);
+
+            return "SUCCESS: File written to " + path + " (" + content.length() + " chars)";
+        } catch (Exception e) {
+            return "ERROR writing file: " + e.getMessage();
+        }
+    }
+}
+```
+
+**File**: `knowledge-bot-ai/src/main/java/com/knowledgebot/ai/tools/DirectoryListTool.java`
+
+```java
+@Component
+public class DirectoryListTool {
+
+    @Tool(description = "List all files and subdirectories at a given path in the workspace. Use this to explore the project structure.")
+    public String listDirectory(
+        @ToolParam(description = "Relative directory path, e.g. 'src/main/java' or '.' for root") String path
+    ) {
+        Path fullPath = workspaceManager.resolve(path);
+        // Walk the directory tree (max 3 levels deep to avoid flooding)
+        // Return a tree-like string representation
+        StringBuilder sb = new StringBuilder();
+        sb.append("📂 ").append(path).append("/\n");
+        try (Stream<Path> walk = Files.walk(fullPath, 3)) {
+            walk.forEach(p -> {
+                int depth = fullPath.relativize(p).getNameCount();
+                String indent = "  ".repeat(depth);
+                String icon = Files.isDirectory(p) ? "📁" : "📄";
+                sb.append(indent).append(icon).append(" ")
+                  .append(p.getFileName()).append("\n");
+            });
+        }
+        return sb.toString();
+    }
+}
+```
+
+**File**: `knowledge-bot-ai/src/main/java/com/knowledgebot/ai/tools/CommandExecutionTool.java`
+
+```java
+@Component
+public class CommandExecutionTool {
+
+    @Tool(description = "Execute a shell command in the workspace directory. Use this to run builds (mvn compile), tests (mvn test), or other terminal commands. Returns stdout + stderr.")
+    public String runCommand(
+        @ToolParam(description = "The shell command to execute, e.g. 'mvn compile' or 'npm install'") String command
+    ) {
+        // SECURITY: Block dangerous commands
+        if (containsDangerousCommand(command)) {
+            return "ERROR: Command blocked by security policy: " + command;
+        }
+
+        if (!permissionService.requestPermission("Execute command: " + command)) {
+            return "ERROR: User denied permission.";
+        }
+
+        try {
+            ProcessBuilder pb = new ProcessBuilder();
+            if (System.getProperty("os.name").toLowerCase().contains("win")) {
+                pb.command("cmd.exe", "/c", command);
+            } else {
+                pb.command("sh", "-c", command);
+            }
+            pb.directory(workspaceManager.getActiveWorkspace().toFile());
+            pb.redirectErrorStream(true);
+
+            Process process = pb.start();
+            String output = new String(process.getInputStream().readAllBytes());
+
+            // Truncate massive outputs
+            if (output.length() > 10000) {
+                output = output.substring(0, 5000) + "\n...[TRUNCATED]...\n"
+                       + output.substring(output.length() - 5000);
+            }
+
+            int exitCode = process.waitFor();
+            return "Exit code: " + exitCode + "\n\n" + output;
+        } catch (Exception e) {
+            return "ERROR executing command: " + e.getMessage();
+        }
+    }
+
+    private boolean containsDangerousCommand(String cmd) {
+        String lower = cmd.toLowerCase();
+        return lower.contains("rm -rf /") || lower.contains("format c:")
+            || lower.contains("del /s /q") || lower.contains(":(){ :|:& };:");
+    }
+}
+```
+
+**File**: `knowledge-bot-ai/src/main/java/com/knowledgebot/ai/tools/SearchCodebaseTool.java`
+
+```java
+@Component
+public class SearchCodebaseTool {
+
+    @Tool(description = "Search for a text pattern across all files in the workspace. Like 'grep'. Use this to find where a class, method, or string is used.")
+    public String searchCodebase(
+        @ToolParam(description = "The text pattern to search for") String query,
+        @ToolParam(description = "Optional: file extension filter, e.g. 'java' or 'xml'. Leave empty for all files.") String fileType
+    ) {
+        // Walk all files in workspace, search for query
+        // Return matching file + line number + line content
+        // Limit to 50 results to prevent context overflow
+    }
+}
+```
+
+### Step 1.2 — Build the Agentic Loop Service
+
+This is the heart of the entire system. It runs the loop: prompt LLM → execute tool calls → feed results back → repeat until LLM is done.
+
+**File**: `knowledge-bot-ai/src/main/java/com/knowledgebot/ai/agent/AgentLoopService.java`
+
+```java
+package com.knowledgebot.ai.agent;
+
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.messages.*;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.stereotype.Service;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * THE AGENTIC LOOP.
+ *
+ * This is the most important class in the entire project.
+ *
+ * HOW IT WORKS:
+ * 1. User sends a message (e.g., "Build a REST API for user management")
+ * 2. We build a system prompt that tells the LLM about its tools and role
+ * 3. We call the LLM with the user message + tool definitions
+ * 4. The LLM responds with EITHER:
+ *    a) A plain text response (done, return to user)
+ *    b) One or more TOOL CALLS (e.g., "call writeFile with path=X, content=Y")
+ * 5. If tool calls: we execute each tool, collect results, append to conversation
+ * 6. Go back to step 3 with the updated conversation
+ * 7. Repeat until the LLM sends a plain text response (no more tool calls)
+ *
+ * SAFETY: We limit to MAX_ITERATIONS to prevent infinite loops.
+ */
+@Service
+public class AgentLoopService {
+
+    private static final int MAX_ITERATIONS = 25;
+    private static final Logger log = LoggerFactory.getLogger(AgentLoopService.class);
+
+    private final ChatClient.Builder chatClientBuilder;
+    private final List<Object> tools; // Spring AI auto-discovers @Tool beans
+
+    // The system prompt that defines the agent's personality and behavior
+    private static final String SYSTEM_PROMPT = """
+        You are an expert software engineer AI assistant called "Agent Manager".
+        You have access to tools that let you read files, write files, list directories,
+        run shell commands, and search the codebase.
+
+        RULES:
+        1. Always explore the project structure FIRST before making changes.
+        2. Read existing files to understand patterns before writing new ones.
+        3. After writing code, run the build command to verify it compiles.
+        4. If a build fails, read the error, fix the code, and try again.
+        5. Create complete, production-ready code — not stubs or pseudocode.
+        6. Follow the project's existing code style and conventions.
+        7. When creating multiple files, create them one at a time.
+        8. Explain what you're doing at each step.
+
+        You are working inside a sandboxed workspace folder. All file paths are
+        relative to this workspace root.
+        """;
+
+    public AgentLoopService(ChatClient.Builder chatClientBuilder,
+                            FileReadTool fileReadTool,
+                            FileWriteTool fileWriteTool,
+                            DirectoryListTool directoryListTool,
+                            CommandExecutionTool commandExecutionTool,
+                            SearchCodebaseTool searchCodebaseTool) {
+        this.chatClientBuilder = chatClientBuilder;
+        this.tools = List.of(fileReadTool, fileWriteTool, directoryListTool,
+                             commandExecutionTool, searchCodebaseTool);
+    }
+
+    /**
+     * Execute an agentic task. The LLM will autonomously use tools
+     * until it decides the task is complete.
+     *
+     * @param userMessage The user's instruction
+     * @param conversationHistory Previous messages (for context)
+     * @return The final text response from the agent
+     */
+    public AgentResponse execute(String userMessage, List<AgentMessage> conversationHistory) {
+        log.info("Starting agentic loop for: {}", userMessage);
+
+        // Build the chat client with tools registered
+        ChatClient client = chatClientBuilder
+            .defaultSystem(SYSTEM_PROMPT)
+            .defaultTools(tools.toArray())
+            .build();
+
+        // Spring AI handles the tool-calling loop internally!
+        // When you call .call(), and the LLM returns tool_calls,
+        // Spring AI automatically:
+        //   1. Executes the matching @Tool method
+        //   2. Sends the tool result back to the LLM
+        //   3. Repeats until the LLM gives a final text response
+        String response = client.prompt()
+            .user(userMessage)
+            .call()
+            .content();
+
+        log.info("Agentic loop completed");
+        return new AgentResponse(response, List.of()); // TODO: track tool calls
+    }
+
+    public record AgentResponse(String content, List<ToolResult> toolCalls) {}
+}
+```
+
+> [!IMPORTANT]
+> **Spring AI 2.0 handles the tool-calling loop natively.** When you register tools with `.defaultTools()` and call `.call()`, Spring AI internally loops: if the LLM response contains tool calls, it executes them and re-prompts until the LLM gives a final text answer. You don't need to write the loop manually — Spring AI does it. Your job is just to define the `@Tool` methods with good descriptions.
+
+### Step 1.3 — Wire the Agentic Loop into the REST Controller
+
+Update `ChatController.java` to add a new endpoint:
+
+```java
+@PostMapping(value = "/agent", produces = MediaType.APPLICATION_JSON_VALUE)
+public ResponseEntity<Map<String, String>> agentExecute(@RequestBody Map<String, String> request) {
+    String prompt = request.get("prompt");
+    if (!workspaceManager.isWorkspaceAttached()) {
+        return ResponseEntity.badRequest().body(Map.of("error", "No workspace attached"));
+    }
+    AgentResponse response = agentLoopService.execute(prompt, List.of());
+    return ResponseEntity.ok(Map.of("response", response.content()));
+}
+```
+
+### Step 1.4 — Add a Streaming Agent Endpoint (SSE)
+
+For the UI to show real-time progress, create a streaming endpoint:
+
+```java
+@GetMapping(value = "/agent/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+public Flux<String> agentStream(@RequestParam String prompt) {
+    // Use .stream() instead of .call() for Server-Sent Events
+    return client.prompt()
+        .user(prompt)
+        .stream()
+        .content();
+}
+```
+
+> **✅ Checkpoint**: After Phase 1, you can send `"Build a Spring Boot REST API"` and the bot will autonomously list the project, read pom.xml, create files, and run Maven compile — all by itself.
+
+---
+
+## Phase 2: Conversation Memory
+
+> **Goal**: The bot remembers what you said previously in the same session, and can recall past project context across sessions.
+
+### Step 2.1 — Create a Session Memory Store
+
+**File**: `knowledge-bot-data/src/main/java/com/knowledgebot/data/memory/SessionMemoryService.java`
+
+```java
+/**
+ * WHY: Without this, every message is independent. The bot doesn't know
+ * what it just did 30 seconds ago. This stores the conversation in-memory
+ * for the current session.
+ *
+ * HOW: We maintain a list of messages (user + assistant + tool calls).
+ * Before each LLM call, we include the recent history in the prompt.
+ * When history gets too long, we summarize older messages to save tokens.
+ */
+@Service
+public class SessionMemoryService {
+
+    private final List<ChatMessage> messages = new ArrayList<>();
+    private final ContextPruningService pruningService;
+    private static final int MAX_MESSAGES = 50;
+
+    public void addUserMessage(String content) {
+        messages.add(new UserMessage(content));
+        trimIfNeeded();
+    }
+
+    public void addAssistantMessage(String content) {
+        messages.add(new AssistantMessage(content));
+        trimIfNeeded();
+    }
+
+    public List<ChatMessage> getHistory() {
+        return List.copyOf(messages);
+    }
+
+    public void clear() {
+        messages.clear();
+    }
+
+    private void trimIfNeeded() {
+        if (messages.size() > MAX_MESSAGES) {
+            // Keep system + last 20 messages, summarize the rest
+            // Use the existing ContextPruningService for this
+        }
+    }
+}
+```
+
+### Step 2.2 — Create Persistent Project Memory
+
+**File**: `knowledge-bot-data/src/main/java/com/knowledgebot/data/memory/ProjectMemoryService.java`
+
+```java
+/**
+ * WHY: Session memory resets when the app restarts. Project memory persists
+ * facts about the workspace across sessions using PgVector.
+ *
+ * WHAT IT STORES:
+ * - "This project uses Spring Boot 4.0 with Java 21"
+ * - "The database is PostgreSQL with PgVector"
+ * - "The main package is com.knowledgebot"
+ * - "The user prefers Lombok annotations"
+ *
+ * HOW: After each significant interaction, the agent extracts key facts
+ * and stores them as embeddings. Before each new task, we recall relevant
+ * facts and inject them into the system prompt.
+ */
+@Service
+public class ProjectMemoryService {
+
+    private final VectorStore vectorStore;
+
+    public void remember(String workspacePath, String fact, String category) {
+        Document doc = new Document(fact, Map.of(
+            "workspace", workspacePath,
+            "category", category,
+            "scope", "project",
+            "timestamp", Instant.now().toString()
+        ));
+        vectorStore.add(List.of(doc));
+    }
+
+    public List<Document> recall(String workspacePath, String context, int topK) {
+        // Search for relevant memories filtered by workspace
+        SearchRequest request = SearchRequest.builder()
+            .query(context)
+            .topK(topK)
+            .similarityThreshold(0.6)
+            .filterExpression("workspace == '" + workspacePath + "'")
+            .build();
+        return vectorStore.similaritySearch(request);
+    }
+}
+```
+
+### Step 2.3 — Integrate Memory into the Agentic Loop
+
+Update `AgentLoopService.execute()` to:
+
+1. Load relevant project memories before the first LLM call
+2. Include session history in each LLM call
+3. After the task completes, extract key learnings and store them
+
+```java
+public AgentResponse execute(String userMessage, List<AgentMessage> conversationHistory) {
+    // 1. Recall project-specific memories
+    String workspacePath = workspaceManager.getActiveWorkspace().toString();
+    List<Document> memories = projectMemoryService.recall(workspacePath, userMessage, 5);
+    String memoryContext = memories.stream()
+        .map(Document::getText)
+        .collect(Collectors.joining("\n"));
+
+    // 2. Build enhanced system prompt with memories
+    String enhancedSystem = SYSTEM_PROMPT + "\n\nPROJECT CONTEXT (from memory):\n" + memoryContext;
+
+    // 3. Execute with full history
+    // ... (rest of agentic loop)
+
+    // 4. After completion, learn key facts
+    projectMemoryService.remember(workspacePath,
+        "Completed task: " + userMessage.substring(0, Math.min(200, userMessage.length())),
+        "task-history");
+}
+```
+
+> **✅ Checkpoint**: After Phase 2, the bot remembers your conversation within a session and recalls past project facts across restarts.
+
+---
+
+## Phase 3: Knowledge Base & Document Ingestion
+
+> **Goal**: You have a folder (e.g., `~/.agentmanager/knowledge/`) where you drop PDFs, markdown files, code samples. The bot reads them before every task.
+
+### Step 3.1 — Create Knowledge Folder Configuration
+
+Add to `application.yml`:
+
+```yaml
+knowledge-bot:
+  knowledge:
+    base-path: ${KNOWLEDGE_BASE_PATH:${user.home}/.agentmanager/knowledge}
+    watch-enabled: true
+    supported-formats: pdf,docx,doc,txt,md,csv,json,xml,yaml,yml
+```
+
+### Step 3.2 — Create Knowledge Ingestion Service
+
+**File**: `knowledge-bot-ai/src/main/java/com/knowledgebot/ai/knowledge/KnowledgeIngestionService.java`
+
+```java
+/**
+ * WHY: This is the "personal memory" feature. You can drop any document
+ * into the knowledge folder and the bot will learn from it.
+ *
+ * HOW IT WORKS:
+ * 1. On startup, scan the knowledge folder for all documents
+ * 2. Parse each document (PDF uses Tika, code uses raw read, etc.)
+ * 3. Split into chunks (each chunk ~500 tokens)
+ * 4. Generate embeddings using the Ollama embedding model
+ * 5. Store in PgVector with metadata (filename, chunk#, timestamp)
+ * 6. Watch the folder for new files and re-index them automatically
+ *
+ * USAGE: Before every agent task, the system queries this knowledge base
+ * for relevant context and injects it into the LLM prompt.
+ */
+@Service
+public class KnowledgeIngestionService {
+
+    private final VectorStore vectorStore;
+    private final MultiFormatParser multiFormatParser;
+    private final CodeChunkingService chunkingService;
+
+    @PostConstruct
+    public void indexExistingDocuments() {
+        Path knowledgePath = Paths.get(knowledgeBasePath);
+        if (!Files.exists(knowledgePath)) {
+            Files.createDirectories(knowledgePath);
+            log.info("Created knowledge base directory: {}", knowledgePath);
+            return;
+        }
+
+        List<Path> files = Files.walk(knowledgePath)
+            .filter(Files::isRegularFile)
+            .filter(multiFormatParser::isSupported)
+            .toList();
+
+        log.info("Indexing {} documents from knowledge base", files.size());
+        for (Path file : files) {
+            indexDocument(file);
+        }
+    }
+
+    public void indexDocument(Path file) {
+        try {
+            Document doc = multiFormatParser.parseFile(file);
+            // Add knowledge-specific metadata
+            doc.getMetadata().put("scope", "knowledge-base");
+            doc.getMetadata().put("indexed-at", Instant.now().toString());
+
+            List<Document> chunks = chunkingService.chunk(doc);
+            vectorStore.add(chunks);
+            log.info("Indexed knowledge document: {} ({} chunks)", file.getFileName(), chunks.size());
+        } catch (Exception e) {
+            log.error("Failed to index knowledge document: {}", file, e);
+        }
+    }
+
+    public List<Document> queryKnowledge(String query, int topK) {
+        SearchRequest request = SearchRequest.builder()
+            .query(query)
+            .topK(topK)
+            .similarityThreshold(0.5)
+            .filterExpression("scope == 'knowledge-base'")
+            .build();
+        return vectorStore.similaritySearch(request);
+    }
+}
+```
+
+### Step 3.3 — Create Knowledge Folder Watcher
+
+```java
+/**
+ * Watches the knowledge folder for new/modified/deleted files
+ * and automatically re-indexes them.
+ */
+@Service
+public class KnowledgeFolderWatcher {
+
+    @PostConstruct
+    public void startWatching() {
+        WatchService watcher = FileSystems.getDefault().newWatchService();
+        Path knowledgePath = Paths.get(knowledgeBasePath);
+        knowledgePath.register(watcher,
+            StandardWatchEventKinds.ENTRY_CREATE,
+            StandardWatchEventKinds.ENTRY_MODIFY);
+
+        // Run in background thread
+        Thread.ofVirtual().start(() -> {
+            while (true) {
+                WatchKey key = watcher.take();
+                for (WatchEvent<?> event : key.pollEvents()) {
+                    Path changed = knowledgePath.resolve((Path) event.context());
+                    log.info("Knowledge file changed: {}", changed);
+                    knowledgeIngestionService.indexDocument(changed);
+                }
+                key.reset();
+            }
+        });
+    }
+}
+```
+
+### Step 3.4 — Create an Upload Endpoint
+
+```java
+@PostMapping("/api/v1/knowledge/upload")
+public ResponseEntity<String> uploadKnowledge(@RequestParam("file") MultipartFile file) {
+    Path target = Paths.get(knowledgeBasePath).resolve(file.getOriginalFilename());
+    Files.copy(file.getInputStream(), target, StandardCopyOption.REPLACE_EXISTING);
+    knowledgeIngestionService.indexDocument(target);
+    return ResponseEntity.ok("Document uploaded and indexed: " + file.getOriginalFilename());
+}
+```
+
+> **✅ Checkpoint**: After Phase 3, you can drop a PDF with API documentation into `~/.agentmanager/knowledge/` and the bot will reference it when building an API.
+
+---
+
+## Phase 4: Web Search & Internet Access
+
+> **Goal**: The bot can search the internet, read web pages, and learn new things during a task.
+
+### Step 4.1 — Create a Web Search Tool
+
+**File**: `knowledge-bot-ai/src/main/java/com/knowledgebot/ai/tools/WebSearchTool.java`
+
+```java
+/**
+ * WHY: The bot needs to look up documentation, APIs, and current best practices.
+ * Without this it can only use what's in its training data and local knowledge.
+ *
+ * HOW: We use DuckDuckGo's HTML endpoint (no API key required).
+ * We fetch the search results page, parse the result snippets,
+ * and return them to the LLM.
+ *
+ * ALTERNATIVE: For better results, you can self-host SearXNG
+ * (a privacy-respecting metasearch engine) via Docker.
+ */
+@Component
+public class WebSearchTool {
+
+    private final HttpClient httpClient = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(10))
+        .build();
+
+    @Tool(description = "Search the internet for information. Use this when you need to look up documentation, find API examples, or learn about a library you're not familiar with. Returns top search results with snippets.")
+    public String webSearch(
+        @ToolParam(description = "The search query, e.g. 'Spring Boot 4 REST controller example'") String query
+    ) {
+        try {
+            String url = "https://html.duckduckgo.com/html/?q=" + URLEncoder.encode(query, "UTF-8");
+
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("User-Agent", "AgentManager/1.0")
+                .GET()
+                .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            String html = response.body();
+
+            // Parse the HTML to extract results
+            // DuckDuckGo HTML results have class "result__snippet" for snippets
+            // and "result__a" for links
+            return parseSearchResults(html, 5); // Return top 5 results
+
+        } catch (Exception e) {
+            return "ERROR: Web search failed: " + e.getMessage();
+        }
+    }
+
+    private String parseSearchResults(String html, int maxResults) {
+        // Simple regex-based parsing (use Jsoup for production)
+        // Extract title, URL, and snippet for each result
+        // Format as:
+        // 1. [Title](URL)
+        //    Snippet text here...
+        // 2. [Title](URL)
+        //    Snippet text here...
+    }
+}
+```
+
+### Step 4.2 — Create a Web Page Reader Tool
+
+```java
+@Component
+public class WebPageReaderTool {
+
+    @Tool(description = "Read and extract the main text content from a web page URL. Use this to read documentation pages, blog posts, or API references that you found via web search.")
+    public String readWebPage(
+        @ToolParam(description = "The full URL to read, e.g. 'https://docs.spring.io/...'") String url
+    ) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("User-Agent", "AgentManager/1.0")
+                .timeout(Duration.ofSeconds(15))
+                .GET()
+                .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            // Strip HTML tags, keep text content
+            String text = stripHtml(response.body());
+
+            // Truncate to prevent context overflow
+            if (text.length() > 20000) {
+                text = text.substring(0, 20000) + "\n\n... [TRUNCATED]";
+            }
+
+            return text;
+        } catch (Exception e) {
+            return "ERROR: Failed to read page: " + e.getMessage();
+        }
+    }
+
+    private String stripHtml(String html) {
+        // Remove script/style tags and their content
+        html = html.replaceAll("<(script|style)[^>]*>.*?</\\1>", "");
+        // Remove HTML tags
+        html = html.replaceAll("<[^>]+>", " ");
+        // Normalize whitespace
+        html = html.replaceAll("\\s+", " ").trim();
+        return html;
+    }
+}
+```
+
+> **✅ Checkpoint**: After Phase 4, the bot can search the internet for "Spring Boot pagination tutorial" and read the documentation to learn how to implement pagination in your project.
+
+---
+
+## Phase 5: File System Tools & Sandbox
+
+> **Goal**: The bot can create directories, delete files, move files — all within the sandboxed workspace.
+
+### Step 5.1 — Create Additional File Tools
+
+```java
+@Component
+public class DirectoryCreateTool {
+    @Tool(description = "Create a new directory (and parent directories if needed) in the workspace.")
+    public String createDirectory(@ToolParam(description = "Relative path") String path) {
+        Path fullPath = workspaceManager.resolve(path);
+        // Sandbox check
+        Files.createDirectories(fullPath);
+        return "SUCCESS: Created directory " + path;
+    }
+}
+
+@Component
+public class FileDeleteTool {
+    @Tool(description = "Delete a file from the workspace. Use with caution.")
+    public String deleteFile(@ToolParam(description = "Relative path") String path) {
+        // PERMISSION: Always ask for confirmation
+        if (!permissionService.requestPermission("DELETE file: " + path)) {
+            return "ERROR: User denied permission to delete.";
+        }
+        Files.delete(fullPath);
+        return "SUCCESS: Deleted " + path;
+    }
+}
+
+@Component
+public class FileEditTool {
+    @Tool(description = "Edit a specific section of a file by finding and replacing text. Use this instead of rewriting entire files when you only need to change a small portion.")
+    public String editFile(
+        @ToolParam(description = "Relative file path") String path,
+        @ToolParam(description = "Exact text to find in the file") String searchText,
+        @ToolParam(description = "Replacement text") String replaceText
+    ) {
+        String content = Files.readString(fullPath);
+        if (!content.contains(searchText)) {
+            return "ERROR: Search text not found in file.";
+        }
+        String updated = content.replace(searchText, replaceText);
+        Files.writeString(fullPath, updated);
+        return "SUCCESS: Replaced text in " + path;
+    }
+}
+```
+
+### Step 5.2 — Enforce Workspace Sandbox Security
+
+Update `WorkspaceManager` with a validation method:
+
+```java
+public void validatePathInWorkspace(Path path) {
+    Path resolved = path.toAbsolutePath().normalize();
+    Path workspace = activeWorkspace.get();
+    if (workspace == null) {
+        throw new SecurityException("No workspace attached");
+    }
+    if (!resolved.startsWith(workspace)) {
+        throw new SecurityException(
+            "Access denied: " + resolved + " is outside workspace " + workspace);
+    }
+}
+```
+
+Every tool calls this before any file operation.
+
+> **✅ Checkpoint**: After Phase 5, the bot has complete file system access within the workspace — read, write, create, delete, edit, list.
+
+---
+
+## Phase 6: Architect Mode: HLD → LLD → Code
+
+> **Goal**: For complex tasks, the bot first creates a High-Level Design, then Low-Level Design, then implements.
+
+### Step 6.1 — Create the Architect Service
+
+**File**: `knowledge-bot-ai/src/main/java/com/knowledgebot/ai/architect/ArchitectService.java`
+
+```java
+/**
+ * WHY: Complex projects shouldn't be coded immediately. A 9-year engineer
+ * first thinks about the architecture, then designs the classes, then codes.
+ *
+ * HOW: Three sequential phases:
+ *
+ * PHASE 1 — HLD (High-Level Design):
+ *   "We need 3 microservices: UserService, OrderService, PaymentService.
+ *    UserService talks to OrderService via REST. PaymentService uses events."
+ *   Output: HLD.md with component diagram, tech choices, data flow.
+ *
+ * PHASE 2 — LLD (Low-Level Design):
+ *   "UserService has: UserController (REST), UserService (business),
+ *    UserRepository (JPA). Entities: User{id, name, email}."
+ *   Output: LLD.md with class diagrams, method signatures, DB schema.
+ *
+ * PHASE 3 — Implementation:
+ *   Actually create the files using the agentic tool loop,
+ *   following the LLD as the blueprint.
+ */
+@Service
+public class ArchitectService {
+
+    private final AgentLoopService agentLoopService;
+    private final FileWriteTool fileWriteTool;
+
+    public ArchitectResult architect(String goal) {
+
+        // STEP 1: Generate HLD
+        String hldPrompt = """
+            You are a Senior Software Architect. Create a High-Level Design (HLD) for:
+
+            GOAL: %s
+
+            Your HLD must include:
+            1. System Overview (1 paragraph)
+            2. Component Architecture (list each component, its responsibility)
+            3. Technology Stack (with justification)
+            4. Data Flow (how data moves between components)
+            5. API Contracts (key endpoints/interfaces)
+            6. Database Schema (tables/collections overview)
+
+            Format as a clean Markdown document.
+            """.formatted(goal);
+
+        String hld = agentLoopService.execute(hldPrompt, List.of()).content();
+        fileWriteTool.writeFile("docs/HLD.md", hld);
+
+        // STEP 2: Generate LLD from HLD
+        String lldPrompt = """
+            You are a Senior Software Engineer. Based on this HLD, create a Low-Level Design (LLD):
+
+            HLD:
+            %s
+
+            Your LLD must include:
+            1. Package Structure (full package tree)
+            2. Class Diagrams (each class with fields and method signatures)
+            3. Sequence Diagrams (key flows in Mermaid syntax)
+            4. Database DDL (CREATE TABLE statements)
+            5. Configuration Files needed
+            6. Dependency List (Maven/Gradle)
+
+            Format as a clean Markdown document with code blocks.
+            """.formatted(hld);
+
+        String lld = agentLoopService.execute(lldPrompt, List.of()).content();
+        fileWriteTool.writeFile("docs/LLD.md", lld);
+
+        // STEP 3: Implement from LLD
+        String implPrompt = """
+            You have the following Low-Level Design. Implement it completely.
+            Use your tools to create all files, directories, and configurations.
+            After creating all files, run the build to verify everything compiles.
+
+            LLD:
+            %s
+
+            IMPORTANT:
+            - Create files ONE AT A TIME
+            - Follow the exact package structure from the LLD
+            - After creating all files, run 'mvn compile' (or appropriate build command)
+            - Fix any build errors
+            """.formatted(lld);
+
+        String implResult = agentLoopService.execute(implPrompt, List.of()).content();
+
+        return new ArchitectResult(hld, lld, implResult);
+    }
+
+    public record ArchitectResult(String hld, String lld, String implementation) {}
+}
+```
+
+### Step 6.2 — Create REST Endpoint for Architect Mode
+
+```java
+@PostMapping("/api/v1/architect")
+public ResponseEntity<Map<String, String>> architect(@RequestBody Map<String, String> request) {
+    String goal = request.get("goal");
+    ArchitectResult result = architectService.architect(goal);
+    return ResponseEntity.ok(Map.of(
+        "hld", result.hld(),
+        "lld", result.lld(),
+        "implementation", result.implementation()
+    ));
+}
+```
+
+> **✅ Checkpoint**: After Phase 6, you can say "Build a Spring Boot REST API for a library management system" and the bot will first design the architecture, then detail the classes, then create all the files.
+
+---
+
+## Phase 7: Code Validation & Reflection Loop
+
+> **Goal**: After generating code, the bot runs the build, sees errors, fixes them, and retries until the code compiles and tests pass.
+
+### Step 7.1 — Wire the Existing ReflectionService into the Agentic Loop
+
+Update the agentic loop system prompt to instruct the LLM to always verify its work:
+
+```java
+private static final String SYSTEM_PROMPT = """
+    ...existing prompt...
+
+    MANDATORY WORKFLOW for code changes:
+    1. Write or modify code files
+    2. Run the build command (mvn compile / npm run build / etc.)
+    3. If the build FAILS:
+       a. Read the error output carefully
+       b. Identify the failing file and line number
+       c. Read the file with readFile
+       d. Fix the error
+       e. Write the corrected file
+       f. Run the build again
+    4. Repeat until the build succeeds
+    5. If tests exist, run them too (mvn test / npm test)
+    6. Fix any test failures the same way
+    7. Only report success AFTER the build and tests pass
+    """;
+```
+
+### Step 7.2 — Create a Build Verification Tool
+
+```java
+@Component
+public class BuildVerificationTool {
+
+    @Tool(description = "Detect the project type and run the appropriate build command. Detects Maven (pom.xml), Gradle (build.gradle), NPM (package.json), etc.")
+    public String verifyBuild() {
+        Path workspace = workspaceManager.getActiveWorkspace();
+
+        if (Files.exists(workspace.resolve("pom.xml"))) {
+            return runCommand("mvn compile -q");
+        } else if (Files.exists(workspace.resolve("build.gradle"))) {
+            return runCommand("gradle build");
+        } else if (Files.exists(workspace.resolve("package.json"))) {
+            return runCommand("npm run build");
+        }
+
+        return "WARNING: Could not detect project type. No build command run.";
+    }
+}
+```
+
+> **✅ Checkpoint**: After Phase 7, the bot generates code, compiles it, finds errors, fixes them, and retries — just like a real developer.
+
+---
+
+## Phase 8: Startup Flow & Folder Permission
+
+> **Goal**: When the app starts, force the user to pick a workspace folder before anything else works.
+
+### Step 8.1 — Backend: Enforce Workspace Selection
+
+Add a Spring Web filter that blocks ALL API calls except workspace-related ones if no workspace is attached:
+
+```java
+@Component
+public class WorkspaceRequiredFilter implements WebFilter {
+
+    private final WorkspaceManager workspaceManager;
+
+    private static final Set<String> EXEMPT_PATHS = Set.of(
+        "/api/v1/workspace",
+        "/api/v1/health",
+        "/api/v1/settings"
+    );
+
+    @Override
+    public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
+        String path = exchange.getRequest().getPath().value();
+
+        if (EXEMPT_PATHS.stream().anyMatch(path::startsWith)) {
+            return chain.filter(exchange);
+        }
+
+        if (!workspaceManager.isWorkspaceAttached()) {
+            exchange.getResponse().setStatusCode(HttpStatus.PRECONDITION_REQUIRED);
+            // Return JSON error telling the UI to show the folder picker
+            return exchange.getResponse().writeWith(
+                Mono.just(exchange.getResponse().bufferFactory()
+                    .wrap("{\"error\":\"WORKSPACE_REQUIRED\"}".getBytes()))
+            );
+        }
+
+        return chain.filter(exchange);
+    }
+}
+```
+
+### Step 8.2 — Backend: Workspace Selection Endpoints
+
+```java
+@RestController
+@RequestMapping("/api/v1/workspace")
+public class WorkspaceController {
+
+    @PostMapping("/attach")
+    public ResponseEntity<Map<String, String>> attach(@RequestBody Map<String, String> request) {
+        String path = request.get("path");
+        workspaceManager.attach(Paths.get(path));
+        return ResponseEntity.ok(Map.of(
+            "status", "attached",
+            "path", workspaceManager.getActiveWorkspace().toString()
+        ));
+    }
+
+    @GetMapping("/status")
+    public ResponseEntity<Map<String, Object>> status() {
+        return ResponseEntity.ok(Map.of(
+            "attached", workspaceManager.isWorkspaceAttached(),
+            "path", workspaceManager.isWorkspaceAttached()
+                ? workspaceManager.getActiveWorkspace().toString() : ""
+        ));
+    }
+
+    @PostMapping("/detach")
+    public ResponseEntity<Map<String, String>> detach() {
+        workspaceManager.detach();
+        return ResponseEntity.ok(Map.of("status", "detached"));
+    }
+}
+```
+
+### Step 8.3 — Frontend: Mandatory Folder Picker Modal
+
+> [!IMPORTANT]
+> **Browser limitation**: Web browsers CANNOT access actual OS file paths for security reasons. The `webkitdirectory` API gives you file names, not paths. For the "pick a folder" feature to work properly, the user must type or paste the folder path, and the backend validates it. Alternatively, you can use Electron or Tauri to get native folder picker access.
+>
+> **Recommended approach for v1**: Use a text input where the user pastes the folder path. The backend validates it exists and attaches it.
+>
+> **For v2**: Wrap the UI in Tauri (Rust-based, lightweight) for native folder picker.
+
+---
+
+## Phase 9: UI Overhaul — Agent Manager (Antigravity-Inspired)
+
+> **Goal**: Replace the current static HTML/CSS/JS UI with a modern React app inspired by Antigravity's agent manager interface.
+
+### Step 9.1 — Initialize the React Project
+
+```bash
+# Navigate to the project root
+cd d:\Agent-assistant
+
+# Create the new UI project using Vite + React
+npx -y create-vite@latest knowledge-bot-ui-v2 --template react
+
+# Install dependencies
+cd knowledge-bot-ui-v2
+npm install
+npm install react-router-dom
+npm install react-markdown
+npm install @uiw/react-codemirror @codemirror/lang-java @codemirror/lang-javascript
+npm install lucide-react    # Modern icon library
+npm install framer-motion   # Smooth animations
+```
+
+### Step 9.2 — Design System & Layout
+
+The UI has these main areas:
+
+```
+┌─────────────────────────────────────────────────┐
+│  STARTUP MODAL (folder picker)                  │
+│  ┌─────────────────────────────────────────┐    │
+│  │ 🤖 Agent Manager                        │    │
+│  │                                         │    │
+│  │ Select your project workspace:          │    │
+│  │ [________________________________] 📁   │    │
+│  │                                         │    │
+│  │ Choose your editor:                     │    │
+│  │ (●) VS Code  ( ) IntelliJ IDEA        │    │
+│  │                                         │    │
+│  │         [  Launch Agent Manager  ]      │    │
+│  └─────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────┘
+
+After folder is selected:
+
+┌──────┬──────────────────────────────────────────┐
+│      │  🤖 Agent Manager              [⚙️]     │
+│ Side │─────────────────────────────────────────│
+│ bar  │                                         │
+│      │  Chat Area                              │
+│ 📁   │  ┌─────────────────────────────────┐   │
+│ Wrksp│  │ Agent: I'll start by examining  │   │
+│      │  │ your project structure...       │   │
+│ 🤖   │  │                                 │   │
+│Agents│  │ 📁 Listing: src/main/java/      │   │
+│      │  │ ├── 📁 com/                     │   │
+│Status│  │ │   └── 📁 example/             │   │
+│      │  │ │       ├── 📄 App.java         │   │
+│ 📝   │  │ │       └── 📁 controller/      │   │
+│Memory│  │ ...                             │   │
+│      │  │                                 │   │
+│ ⚡   │  │ Agent: Now I'll create the      │   │
+│Tools │  │ UserController...               │   │
+│      │  │                                 │   │
+│      │  │ ✅ Created: UserController.java │   │
+│      │  │ ✅ Created: UserService.java    │   │
+│      │  │ ⚡ Running: mvn compile         │   │
+│      │  │ ✅ Build successful!            │   │
+│      │  └─────────────────────────────────┘   │
+│      │                                         │
+│      │  ┌─────────────────────────────────┐   │
+│      │  │ [Type your instructions...]  ➤  │   │
+│      │  └─────────────────────────────────┘   │
+└──────┴──────────────────────────────────────────┘
+```
+
+### Step 9.3 — Component Structure
+
+```
+src/
+├── App.jsx                    # Root: routing + startup flow
+├── main.jsx                   # Entry point
+├── index.css                  # Global design tokens
+├── components/
+│   ├── startup/
+│   │   └── StartupModal.jsx   # Folder picker + editor choice
+│   ├── layout/
+│   │   ├── Sidebar.jsx        # Left sidebar
+│   │   └── TopBar.jsx         # Top navigation
+│   ├── chat/
+│   │   ├── ChatPanel.jsx      # Main chat area
+│   │   ├── MessageBubble.jsx  # Individual message
+│   │   ├── ToolCallCard.jsx   # Shows when agent uses a tool
+│   │   ├── CodeBlock.jsx      # Syntax-highlighted code
+│   │   └── ChatInput.jsx      # Input textarea + send button
+│   ├── agents/
+│   │   ├── AgentStatusPanel.jsx  # Shows all agents + their state
+│   │   └── AgentCard.jsx         # Individual agent status
+│   ├── workspace/
+│   │   ├── FileTree.jsx       # File explorer tree
+│   │   └── WorkspaceInfo.jsx  # Current workspace display
+│   ├── knowledge/
+│   │   ├── KnowledgePanel.jsx # Upload & manage knowledge docs
+│   │   └── DocumentCard.jsx   # Individual document info
+│   └── common/
+│       ├── Toast.jsx          # Notification toasts
+│       └── Modal.jsx          # Reusable modal
+├── services/
+│   ├── apiClient.js           # HTTP client for backend
+│   ├── streamClient.js        # SSE streaming client
+│   └── websocketClient.js     # WebSocket for agent status
+├── hooks/
+│   ├── useChat.js             # Chat state management
+│   ├── useAgentStatus.js      # Agent status polling
+│   └── useWorkspace.js        # Workspace state
+└── theme/
+    ├── colors.js              # Color palette
+    └── animations.js          # Framer Motion presets
+```
+
+### Step 9.4 — Key Component: StartupModal
+
+```jsx
+// src/components/startup/StartupModal.jsx
+import { useState } from 'react';
+import { motion } from 'framer-motion';
+
+/**
+ * WHY: This is the FIRST thing the user sees.
+ * They MUST select a folder before anything else works.
+ *
+ * HOW: The user pastes a folder path → we call POST /api/v1/workspace/attach
+ * → if successful, the modal closes and the chat opens.
+ */
+export function StartupModal({ onAttached }) {
+  const [path, setPath] = useState('');
+  const [editor, setEditor] = useState('vscode');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleLaunch = async () => {
+    if (!path.trim()) {
+      setError('Please enter a folder path');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await fetch('http://localhost:8080/api/v1/workspace/attach', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: path.trim() })
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        setError(data.error || 'Failed to attach workspace');
+        return;
+      }
+
+      // Save editor preference
+      localStorage.setItem('preferred-editor', editor);
+
+      onAttached({ path: path.trim(), editor });
+    } catch (e) {
+      setError('Cannot connect to backend. Is it running on port 8080?');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <motion.div className="startup-overlay"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}>
+
+      <motion.div className="startup-modal"
+        initial={{ scale: 0.9, y: 20 }}
+        animate={{ scale: 1, y: 0 }}
+        transition={{ type: "spring", duration: 0.5 }}>
+
+        <div className="startup-logo">🤖</div>
+        <h1>Agent Manager</h1>
+        <p className="startup-subtitle">Your AI Co-Worker</p>
+
+        <div className="startup-field">
+          <label>Project Workspace</label>
+          <div className="path-input-wrap">
+            <input
+              type="text"
+              value={path}
+              onChange={e => setPath(e.target.value)}
+              placeholder="Paste your project folder path, e.g., D:\Projects\my-app"
+            />
+            <span className="path-icon">📁</span>
+          </div>
+        </div>
+
+        <div className="startup-field">
+          <label>Preferred Editor</label>
+          <div className="editor-choices">
+            <button
+              className={`editor-btn ${editor === 'vscode' ? 'active' : ''}`}
+              onClick={() => setEditor('vscode')}>
+              <span>📝</span> VS Code
+            </button>
+            <button
+              className={`editor-btn ${editor === 'intellij' ? 'active' : ''}`}
+              onClick={() => setEditor('intellij')}>
+              <span>☕</span> IntelliJ IDEA
+            </button>
+          </div>
+        </div>
+
+        {error && <div className="startup-error">{error}</div>}
+
+        <button className="launch-btn" onClick={handleLaunch} disabled={loading}>
+          {loading ? 'Connecting...' : '🚀 Launch Agent Manager'}
+        </button>
+      </motion.div>
+    </motion.div>
+  );
+}
+```
+
+### Step 9.5 — Key Component: ToolCallCard
+
+This is the visual element that shows when the agent uses a tool:
+
+```jsx
+// src/components/chat/ToolCallCard.jsx
+/**
+ * WHY: Unlike a regular chatbot, our agent DOES THINGS.
+ * We need to visually show what tools it's using in real-time.
+ *
+ * RENDERS LIKE:
+ *  ┌─ 📄 readFile ─────────────────────┐
+ *  │ Path: src/main/java/App.java       │
+ *  │ Status: ✅ Success (243 lines)     │
+ *  └────────────────────────────────────┘
+ *
+ *  ┌─ 📝 writeFile ────────────────────┐
+ *  │ Path: src/main/java/User.java      │
+ *  │ Status: ✅ Created (45 lines)      │
+ *  └────────────────────────────────────┘
+ *
+ *  ┌─ ⚡ runCommand ────────────────────┐
+ *  │ Command: mvn compile               │
+ *  │ Status: ❌ FAILED (exit code 1)    │
+ *  │ ▼ Show output                      │
+ *  └────────────────────────────────────┘
+ */
+export function ToolCallCard({ tool }) {
+  const icons = {
+    readFile: '📄', writeFile: '📝', listDirectory: '📁',
+    runCommand: '⚡', webSearch: '🌐', searchCodebase: '🔍',
+    editFile: '✏️', createDirectory: '📁', deleteFile: '🗑️'
+  };
+
+  return (
+    <motion.div className="tool-call-card"
+      initial={{ opacity: 0, x: -10 }}
+      animate={{ opacity: 1, x: 0 }}>
+      <div className="tool-header">
+        <span className="tool-icon">{icons[tool.name] || '🔧'}</span>
+        <span className="tool-name">{tool.name}</span>
+        <span className={`tool-status ${tool.success ? 'success' : 'failed'}`}>
+          {tool.success ? '✅' : '❌'}
+        </span>
+      </div>
+      <div className="tool-args">
+        {Object.entries(tool.arguments).map(([key, val]) => (
+          <div key={key} className="tool-arg">
+            <span className="arg-key">{key}:</span>
+            <span className="arg-value">{String(val).substring(0, 100)}</span>
+          </div>
+        ))}
+      </div>
+    </motion.div>
+  );
+}
+```
+
+### Step 9.6 — CSS Design System (Dark Theme)
+
+**File**: `src/index.css`
+
+```css
+:root {
+  /* Color Palette — Dark Mode (Inspired by Antigravity) */
+  --bg-primary: #0a0a0f;
+  --bg-secondary: #12121a;
+  --bg-tertiary: #1a1a2e;
+  --bg-card: #16161f;
+
+  --accent-primary: #6366f1;
+  --accent-secondary: #8b5cf6;
+  --accent-gradient: linear-gradient(135deg, #6366f1, #8b5cf6);
+
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted: #475569;
+
+  --success: #22c55e;
+  --warning: #eab308;
+  --error: #ef4444;
+
+  --border: #1e1e2e;
+  --border-active: #6366f1;
+
+  /* Typography */
+  --font-sans: 'Inter', -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+
+  /* Sizing */
+  --sidebar-width: 280px;
+  --topbar-height: 56px;
+  --radius: 12px;
+  --radius-sm: 8px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  overflow: hidden;
+  height: 100vh;
+}
+
+/* Startup Modal */
+.startup-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(20px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.startup-modal {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  padding: 48px;
+  max-width: 500px;
+  width: 90%;
+  text-align: center;
+  box-shadow: 0 40px 80px rgba(0, 0, 0, 0.5);
+}
+
+.startup-logo {
+  font-size: 64px;
+  margin-bottom: 16px;
+}
+
+.startup-modal h1 {
+  font-size: 28px;
+  font-weight: 700;
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.launch-btn {
+  width: 100%;
+  padding: 14px 24px;
+  background: var(--accent-gradient);
+  border: none;
+  border-radius: var(--radius);
+  color: white;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.launch-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(99, 102, 241, 0.4);
+}
+
+/* Tool Call Cards */
+.tool-call-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin: 8px 0;
+  font-size: 13px;
+  font-family: var(--font-mono);
+}
+
+.tool-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tool-status.success { color: var(--success); }
+.tool-status.failed { color: var(--error); }
+```
+
+> **✅ Checkpoint**: After Phase 9, you have a sleek, dark-themed React UI with a mandatory startup modal, real-time chat with tool call visualization, and agent status sidebar.
+
+---
+
+## Phase 10: IDE Integration
+
+> **Goal**: When the bot creates or modifies a file, the user can click to open it in VS Code or IntelliJ.
+
+### Step 10.1 — Backend: IDE Launcher Endpoint
+
+```java
+@RestController
+@RequestMapping("/api/v1/ide")
+public class IdeController {
+
+    @PostMapping("/open")
+    public ResponseEntity<String> openInIde(
+        @RequestBody Map<String, String> request
+    ) {
+        String filePath = request.get("path");
+        String editor = request.getOrDefault("editor", "vscode");
+
+        Path fullPath = workspaceManager.resolve(filePath);
+
+        try {
+            ProcessBuilder pb;
+            if ("intellij".equals(editor)) {
+                // IntelliJ IDEA command line
+                pb = new ProcessBuilder("idea", fullPath.toString());
+            } else {
+                // VS Code command line
+                pb = new ProcessBuilder("code", fullPath.toString());
+            }
+            pb.start();
+            return ResponseEntity.ok("Opened in " + editor);
+        } catch (Exception e) {
+            return ResponseEntity.status(500)
+                .body("Failed to open editor: " + e.getMessage());
+        }
+    }
+}
+```
+
+### Step 10.2 — Frontend: "Open in Editor" Button
+
+In `ToolCallCard.jsx`, when showing a file write:
+
+```jsx
+{tool.name === 'writeFile' && (
+  <button className="open-in-editor-btn" onClick={() => openInEditor(tool.arguments.path)}>
+    📝 Open in {editorPreference === 'intellij' ? 'IntelliJ' : 'VS Code'}
+  </button>
+)}
+```
+
+```javascript
+async function openInEditor(path) {
+  await fetch('http://localhost:8080/api/v1/ide/open', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      path,
+      editor: localStorage.getItem('preferred-editor') || 'vscode'
+    })
+  });
+}
+```
+
+> **✅ Checkpoint**: After Phase 10, every file the agent creates has an "Open in VS Code" or "Open in IntelliJ" button.
+
+---
+
+## Phase 11: End-to-End Integration & Polish
+
+> **Goal**: Wire everything together and test with real-world scenarios.
+
+### Step 11.1 — Integration Test Scenarios
+
+Run these tests manually to verify everything works:
+
+| # | Test Case | Expected Result |
+|---|-----------|-----------------|
+| 1 | Start the app without workspace | Startup modal appears, no other UI works |
+| 2 | Enter folder path → Launch | Chat UI opens, bot has workspace access |
+| 3 | "Show me the project structure" | Bot calls `listDirectory`, shows tree |
+| 4 | "Create a hello world Spring Boot app" | Bot creates files, runs Maven, success |
+| 5 | "Read the pom.xml and tell me the Spring version" | Bot reads file, answers correctly |
+| 6 | "Search the internet for Spring Boot pagination" | Bot searches DuckDuckGo, returns results |
+| 7 | Drop a PDF into knowledge folder | Auto-indexed notification appears |
+| 8 | "What does the document I uploaded say about X?" | Bot queries knowledge base, answers |
+| 9 | "Build a REST API for a todo app with HLD first" | Bot creates HLD.md, LLD.md, then code |
+| 10 | Click "Open in VS Code" on a created file | VS Code opens the file |
+| 11 | Build error occurs | Bot reads error, fixes code, rebuilds |
+| 12 | Ask a follow-up question referencing earlier work | Bot remembers conversation context |
+
+### Step 11.2 — Performance Optimization
+
+1. **Add response caching**: Cache repeated LLM calls for identical prompts
+2. **Streaming responses**: All chat responses should stream via SSE
+3. **Virtual threads**: Ensure `spring.threads.virtual.enabled: true` is set
+4. **Tool execution timeout**: Add 60-second timeout to all tool executions
+
+### Step 11.3 — Error Handling
+
+Add global error handling to the agent loop:
+
+```java
+// If a tool throws an exception, catch it and send error message
+// back to the LLM instead of crashing:
+// "Tool 'writeFile' failed with error: Permission denied"
+// The LLM can then decide to try a different approach.
+```
+
+### Step 11.4 — WebSocket for Real-Time Agent Updates
+
+Instead of polling, use WebSocket to push agent status updates:
+
+```java
+@Configuration
+@EnableWebSocket
+public class WebSocketConfig implements WebSocketConfigurer {
+    @Override
+    public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
+        registry.addHandler(agentStatusHandler(), "/ws/agent-status")
+                .setAllowedOrigins("*");
+    }
+}
+```
+
+This allows the UI to show agent tool calls in real-time as they happen.
+
+### Step 11.5 — Production Docker Compose
+
+```yaml
+version: '3.8'
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports: ["11434:11434"]
+    volumes: [ollama_data:/root/.ollama]
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports: ["5433:5432"]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+
+  backend:
+    build: .
+    ports: ["8080:8080"]
+    depends_on: [ollama, postgres]
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      SPRING_AI_OLLAMA_BASE_URL: http://ollama:11434
+
+  frontend:
+    build: ./knowledge-bot-ui-v2
+    ports: ["3000:3000"]
+    depends_on: [backend]
+
+volumes:
+  ollama_data:
+  postgres_data:
+```
+
+---
+
+## Summary: The Complete Architecture
+
+```mermaid
+graph TD
+    User[👤 User] --> UI[React UI<br/>Agent Manager]
+    UI -->|REST/SSE/WS| Backend[Spring Boot Backend]
+
+    Backend --> AgentLoop[🧠 Agentic Loop Service]
+    AgentLoop -->|Tool Calls| Tools{Available Tools}
+
+    Tools --> FileRead[📄 Read File]
+    Tools --> FileWrite[📝 Write File]
+    Tools --> DirList[📁 List Directory]
+    Tools --> RunCmd[⚡ Run Command]
+    Tools --> Search[🔍 Search Codebase]
+    Tools --> WebSearch[🌐 Web Search]
+    Tools --> WebRead[📰 Read Web Page]
+
+    AgentLoop --> Memory{Memory System}
+    Memory --> Session[💬 Session Memory]
+    Memory --> Project[📁 Project Memory<br/>PgVector]
+    Memory --> Knowledge[📚 Knowledge Base<br/>PgVector]
+
+    AgentLoop --> Architect[🏗️ Architect Service]
+    Architect --> HLD[HLD.md]
+    Architect --> LLD[LLD.md]
+    Architect --> Code[📄 Generated Code]
+
+    AgentLoop --> Reflection[🔄 Reflection Loop]
+    Reflection --> Build[Maven/NPM Build]
+    Reflection --> Fix[Fix Errors]
+
+    AgentLoop --> Ollama[🦙 Ollama<br/>Local LLM]
+
+    UI -->|Click| IDE[📝 VS Code / IntelliJ]
+
+    style AgentLoop fill:#6366f1,color:#fff
+    style Ollama fill:#22c55e,color:#fff
+    style Tools fill:#8b5cf6,color:#fff
+```
+
+---
+
+## Module-by-Module File Map
+
+After all phases are complete, here is every file you should have:
+
+```
+d:\Agent-assistant\
+├── docker-compose.yml
+├── pom.xml (parent)
+├── .env.example
+│
+├── knowledge-bot-common/
+│   └── src/main/java/com/knowledgebot/common/dto/
+│       ├── AgentMessage.java
+│       ├── ToolCall.java
+│       ├── ToolResult.java
+│       └── ConversationTurn.java
+│
+├── knowledge-bot-core/
+│   └── src/main/java/com/knowledgebot/core/
+│       ├── performance/  (TokenBudgetService, HardwareMetricsService) ← KEEP
+│       ├── scanner/       (WorkspaceScannerService, SemanticIndexingService, etc.) ← KEEP
+│       └── security/      (CommandPermissionService, PromptInjectionGuard, OutputSanitizer) ← KEEP
+│
+├── knowledge-bot-data/
+│   └── src/main/java/com/knowledgebot/data/
+│       ├── config/VectorStoreConfig.java ← KEEP
+│       └── memory/
+│           ├── GlobalKnowledgeService.java ← KEEP + ENHANCE
+│           ├── SessionMemoryService.java ← NEW (Phase 2)
+│           ├── ProjectMemoryService.java ← NEW (Phase 2)
+│           ├── ConflictResolutionService.java ← KEEP
+│           └── WorklogService.java ← KEEP
+│
+├── knowledge-bot-ai/
+│   └── src/main/java/com/knowledgebot/ai/
+│       ├── agent/
+│       │   ├── AgentLoopService.java ← NEW (Phase 1) ⭐ CORE
+│       │   ├── ReflectionService.java ← KEEP + WIRE IN (Phase 7)
+│       │   └── TestExecutionTool.java ← KEEP
+│       ├── architect/
+│       │   └── ArchitectService.java ← NEW (Phase 6)
+│       ├── tools/                     ← NEW (Phase 1, 4, 5) ⭐ CORE
+│       │   ├── FileReadTool.java
+│       │   ├── FileWriteTool.java
+│       │   ├── FileEditTool.java
+│       │   ├── FileDeleteTool.java
+│       │   ├── DirectoryListTool.java
+│       │   ├── DirectoryCreateTool.java
+│       │   ├── CommandExecutionTool.java
+│       │   ├── SearchCodebaseTool.java
+│       │   ├── WebSearchTool.java
+│       │   ├── WebPageReaderTool.java
+│       │   └── BuildVerificationTool.java
+│       ├── knowledge/
+│       │   ├── KnowledgeIngestionService.java ← NEW (Phase 3)
+│       │   └── KnowledgeFolderWatcher.java ← NEW (Phase 3)
+│       ├── model/  (ModelRouterService, ModelRegistry, etc.) ← KEEP + REFACTOR
+│       ├── orchestration/ (DAGScheduler, OrchestratorService, etc.) ← KEEP
+│       ├── planning/ (PlanningService, TrackedPlan) ← KEEP
+│       ├── prompt/ (PromptCompositionService, ContextPruningService) ← KEEP
+│       ├── retrieval/ (RetrievalService) ← KEEP
+│       └── (remaining services) ← KEEP
+│
+├── knowledge-bot-web/
+│   └── src/main/java/com/knowledgebot/
+│       ├── KnowledgeBotApplication.java ← KEEP
+│       ├── config/
+│       │   ├── CacheConfig.java ← KEEP
+│       │   ├── WebSocketConfig.java ← NEW (Phase 11)
+│       │   └── WorkspaceRequiredFilter.java ← NEW (Phase 8)
+│       └── web/
+│           ├── ChatController.java ← KEEP + ADD agent endpoint
+│           ├── WorkspaceController.java ← NEW (Phase 8)
+│           ├── IdeController.java ← NEW (Phase 10)
+│           └── KnowledgeController.java ← NEW (Phase 3)
+│
+├── knowledge-bot-cli/ ← KEEP (refactor into smaller classes)
+│
+└── knowledge-bot-ui-v2/  ← NEW (Phase 9) — Vite + React
+    ├── package.json
+    ├── vite.config.js
+    ├── index.html
+    └── src/
+        ├── App.jsx
+        ├── main.jsx
+        ├── index.css
+        ├── components/ (see Phase 9.3 for full structure)
+        ├── services/
+        ├── hooks/
+        └── theme/
+```
+
+---
+
+## Final Notes for Junior Developers
+
+> [!TIP]
+> 1. **Build each phase completely before moving to the next**. Each phase has a checkpoint — verify it works before continuing.
+> 2. **Write tests as you go**. Every new service should have at least 3 unit tests.
+> 3. **Start Ollama first**: Run `ollama serve` and `ollama pull llama3.2:3b` before starting the app.
+> 4. **Start Docker**: Run `docker compose up -d` for PostgreSQL before the app.
+> 5. **Create `.env` from `.env.example`** and set your database credentials.
+> 6. **The most critical files** are marked with ⭐. If you get stuck, focus on those first.
+> 7. **Spring AI 2.0 documentation**: https://docs.spring.io/spring-ai/reference/ — read the "Tool Calling" section thoroughly.
+> 8. **Don't skip Phase 0**. Cleanup first, build second.
+
+> [!CAUTION]
+> **Security Reminders**:
+> - NEVER allow the agent to access files outside the workspace folder
+> - ALWAYS validate paths with `WorkspaceManager.validatePathInWorkspace()`
+> - ALWAYS block dangerous shell commands in `CommandExecutionTool`
+> - NEVER expose API endpoints without workspace validation
+> - ALWAYS use environment variables for secrets, never hardcode them
