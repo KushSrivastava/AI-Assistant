@@ -13,6 +13,7 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 
 import java.util.List;
+import java.util.Set;
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════
@@ -44,7 +45,7 @@ public class AgentLoopService {
 
     private static final String SYSTEM_PROMPT_TEMPLATE = """
         You are "Agent Manager" — an expert software engineer AI assistant.
-        You work AUTONOMOUSLY inside a sandboxed project workspace.
+        You work inside a sandboxed project workspace and can act autonomously on coding tasks.
         
         YOU HAVE ACCESS TO THESE TOOLS:
         - readFile: Read any file in the workspace
@@ -52,7 +53,7 @@ public class AgentLoopService {
         - editFile: Find-and-replace text within a file (surgical edits)
         - listDirectory: Explore the project structure
         - createDirectory: Create new folders/packages
-        - deleteFile: Delete a file (requires user approval, use sparingly)
+        - deleteFile: Delete a file (use sparingly)
         - runCommand: Execute shell commands (mvn, npm, git, etc.)
         - verifyBuild: Auto-detect project type and run the build (no args needed!)
         - searchCodebase: Search for text patterns across all files
@@ -60,35 +61,42 @@ public class AgentLoopService {
         - webSearch: Search the internet via DuckDuckGo (no API key needed)
         - readWebPage: Fetch and read the text content of a web URL
         
-        ── MANDATORY OPERATING RULES ──────────────────────────────────────────
+        ── WHEN TO USE TOOLS vs WHEN TO JUST TALK ─────────────────────────────
         
-        1. EXPLORE FIRST: Always call listDirectory('.') to understand the project
-           structure BEFORE writing any files. You need to know the package layout.
+        ONLY use tools when the user is asking you to perform a coding task such as:
+        creating files, modifying code, running commands, searching the codebase, etc.
+        
+        For greetings, casual questions, or general conversation (e.g. "Hi", "How are you?",
+        "What can you do?"), respond naturally in plain text WITHOUT calling any tools.
+        
+        ── MANDATORY OPERATING RULES (apply only during coding tasks) ──────────
+        
+        1. EXPLORE FIRST: Before writing new files, call listDirectory('.') to understand
+           the project structure and package layout.
         
         2. READ BEFORE WRITE: Always call readFile on existing files before modifying
            them. Never overwrite a file without understanding its current content.
         
         3. BUILD VERIFY LOOP (CRITICAL):
            a. After writing or modifying code files, call verifyBuild() — it auto-detects Maven/Gradle/NPM.
-           b. If build FAILS: read the error, find the failing file with readFile, fix it with editFile or writeFile.
+           b. If build FAILS: read the error, find the failing file, fix it.
            c. Call verifyBuild() again. Repeat until it returns ✅ BUILD SUCCESS.
-           d. NEVER report success without a green build. Zero exceptions.
+           d. NEVER report success without a green build.
         
         4. FILE-BY-FILE: When creating multiple files, do them ONE AT A TIME.
-           Write file A → run build → fix any errors → write file B → run build.
+           Write file A → run build → fix errors → write file B → run build.
         
         5. COMPLETE CODE ONLY: Write production-ready, compilable code.
-           No stubs, no TODO placeholders in method bodies, no pseudocode.
+           No stubs, no TODO placeholders, no pseudocode.
         
-        6. FOLLOW CONVENTIONS: Read 2-3 existing source files to understand the
-           project's code style, naming conventions, and architectural patterns
-           before writing new code.
+        6. FOLLOW CONVENTIONS: Read 2-3 existing source files before writing new code
+           to understand the project's style and architectural patterns.
         
         7. EXPLAIN YOUR STEPS: Before each tool call, briefly say what you're doing
            and why. After the task, summarize what was created/changed.
         
         8. SANDBOX SAFE: All file paths MUST be relative to the workspace root.
-           Never attempt absolute paths outside the workspace.
+           Never use absolute paths outside the workspace.
         
         ── PROJECT MEMORY (what I remember about this project) ────────────────
         %s
@@ -98,8 +106,29 @@ public class AgentLoopService {
         
         ── RESPONSE FORMAT ────────────────────────────────────────────────────
         Wrap file contents in markdown code blocks with the language specified.
-        Always confirm with: ✅ Task complete — [brief summary of what was done].
+        For completed coding tasks, confirm with: ✅ Task complete — [brief summary].
+        For conversational replies, respond naturally without the task-complete marker.
         """;
+
+    /**
+     * Short conversational messages that should never trigger tool execution.
+     * Checked before running the full agentic loop.
+     */
+    private static final Set<String> CONVERSATIONAL_PREFIXES = Set.of(
+        "hi", "hello", "hey", "howdy", "greetings", "good morning", "good evening",
+        "good afternoon", "what can you do", "who are you", "what are you",
+        "thanks", "thank you", "bye", "goodbye", "ok", "okay", "cool", "great",
+        "help", "what is your name"
+    );
+
+    /** Returns true when the message is clearly conversational (no tools needed). */
+    private boolean isConversational(String message) {
+        if (message == null) return false;
+        String normalized = message.trim().toLowerCase().replaceAll("[^a-z0-9 ]", "");
+        // Very short messages or exact prefix match
+        if (normalized.length() <= 12) return true;
+        return CONVERSATIONAL_PREFIXES.stream().anyMatch(normalized::startsWith);
+    }
 
     private final ChatClient chatClientTemplate;  // blueprint — we build per-request
     private final ChatClient.Builder chatClientBuilder;
@@ -208,7 +237,13 @@ public class AgentLoopService {
 
         // ── Step 5: Run the agentic loop ──────────────────────────────────────
         try {
-            String response = chatClientTemplate.prompt()
+            // For purely conversational messages, skip tool-calling to avoid
+            // the LLM calling listDirectory() before every single reply.
+            ChatClient client = isConversational(userMessage)
+                ? chatClientBuilder.build()  // no tools — plain conversation
+                : chatClientTemplate;        // full tool-calling agent
+
+            String response = client.prompt()
                 .system(enhancedSystemPrompt)
                 .user(userMessage)
                 .call()
@@ -220,7 +255,7 @@ public class AgentLoopService {
             // ── Step 6: Store what was accomplished ───────────────────────────
             sessionMemory.addAssistantMessage(response);
 
-            if (workspacePath != null) {
+            if (workspacePath != null && !isConversational(userMessage)) {
                 projectMemory.rememberTask(workspacePath, userMessage);
             }
 
