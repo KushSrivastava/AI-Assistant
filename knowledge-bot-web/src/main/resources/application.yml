@@ -113,6 +113,15 @@ knowledge-bot:
     watch-enabled: true
     supported-formats: pdf,docx,doc,txt,md,csv,json,xml,yaml,yml
 
+  mcp:
+    servers:
+      brave-search:
+        transport: stdio
+        command: npx.cmd
+        args: ["-y", "@modelcontextprotocol/server-brave-search"]
+        env:
+          BRAVE_API_KEY: ${BRAVE_API_KEY:}
+
 # Logging configuration
 logging:
   level:

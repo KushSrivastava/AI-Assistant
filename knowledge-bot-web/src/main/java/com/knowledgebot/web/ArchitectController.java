@@ -100,7 +100,7 @@ public class ArchitectController {
         }
 
         try {
-            String hld = architectService.generateHld(goal);
+            String hld = architectService.generateHLD(goal);
             return ResponseEntity.ok(Map.of(
                 "hld",      hld,
                 "savedTo",  workspaceManager.isWorkspaceAttached() ? "docs/HLD.md" : "(no workspace)"
@@ -125,7 +125,7 @@ public class ArchitectController {
         }
 
         try {
-            String lld = architectService.generateLld(hld);
+            String lld = architectService.generateLLD(hld);
             return ResponseEntity.ok(Map.of(
                 "lld",     lld,
                 "savedTo", workspaceManager.isWorkspaceAttached() ? "docs/LLD.md" : "(no workspace)"
