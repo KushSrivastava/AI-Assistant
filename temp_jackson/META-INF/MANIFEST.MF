@@ -1,0 +1,33 @@
+Manifest-Version: 1.0
+Created-By: 17.0.18 (Eclipse Adoptium)
+Build-Jdk-Spec: 17
+Implementation-Title: mcp-json-jackson3
+Implementation-Version: 1.1.0
+Automatic-Module-Name: io.modelcontextprotocol.sdk.mcp-json-jackson3
+Bnd-LastModified: 1773404398659
+Bundle-ActivationPolicy: lazy
+Bundle-Description: Java MCP SDK JSON implementation based on Jackson 3
+Bundle-DocURL: https://github.com/modelcontextprotocol/java-sdk
+Bundle-License: "MIT License";link="https://www.opensource.org/licenses/
+ mit-license.php"
+Bundle-ManifestVersion: 2
+Bundle-Name: Bundle io.modelcontextprotocol.sdk : mcp-json-jackson3
+Bundle-SCM: url="https://github.com/modelcontextprotocol/java-sdk",conne
+ ction="scm:git:git://github.com/modelcontextprotocol/java-sdk.git",deve
+ loper-connection="scm:git:ssh://git@github.com/modelcontextprotocol/jav
+ a-sdk.git",tag=HEAD
+Bundle-SymbolicName: io.modelcontextprotocol.sdk.mcp-json-jackson3
+Bundle-Vendor: Anthropic
+Bundle-Version: 1.1.0
+Import-Package: io.modelcontextprotocol.json;version="[1.1,2)",io.modelc
+ ontextprotocol.json.schema;version="[1.1,2)",com.networknt.schema;versi
+ on="[3.0,4)",com.networknt.schema.dialect;version="[3.0,4)",org.slf4j;v
+ ersion="[2.0,3)",tools.jackson.core;version="[3.0,4)",tools.jackson.dat
+ abind;version="[3.0,4)",tools.jackson.databind.json;version="[3.0,4)",t
+ ools.jackson.databind.type;version="[3.0,4)"
+Require-Capability: osgi.ee;filter:="(&(osgi.ee=JavaSE)(version=17))"
+Service-Component: OSGI-INF/io.modelcontextprotocol.json.jackson3.Jackso
+ nMcpJsonMapperSupplier.xml,OSGI-INF/io.modelcontextprotocol.json.schema
+ .jackson3.JacksonJsonSchemaValidatorSupplier.xml
+Tool: Bnd-7.1.0.202411251545
+

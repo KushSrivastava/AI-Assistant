@@ -9,34 +9,22 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.document.Document;
+import org.springframework.ai.mcp.SyncMcpToolCallbackProvider;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════
- * THE AGENTIC LOOP — upgraded with MEMORY (Phase 2)
+ * THE AGENTIC LOOP — upgraded with MEMORY & MCP INTEGRATION
  * ═══════════════════════════════════════════════════════════════════════════
  *
- * WHAT'S NEW IN PHASE 2:
- *
- * Before each task (RECALL):
- *   1. Load relevant project memories from PgVector (e.g., "uses Spring Boot 4")
- *   2. Load recent conversation turns from SessionMemoryService
- *   3. Inject both into the LLM system prompt as context
- *
- * After each task (LEARN):
- *   4. Record what task was completed → persist to PgVector for future sessions
- *   5. Append user message + assistant response to session window
- *
- * RESULT: The agent now knows:
- *   - What happened in the CURRENT SESSION (session memory)
- *   - What happened in PAST SESSIONS for this project (project memory / PgVector)
- *
- * Spring AI still handles the tool-calling loop internally.
- * We only add memory injection around the .call() invocation.
+ * Refactored to support Model Context Protocol (MCP). Native web search tools 
+ * have been pruned in favor of dynamically injected MCP tool callbacks (e.g., Brave Search).
  */
 @Service
 public class AgentLoopService {
@@ -58,8 +46,7 @@ public class AgentLoopService {
         - verifyBuild: Auto-detect project type and run the build (no args needed!)
         - searchCodebase: Search for text patterns across all files
         - queryKnowledge: Search the personal knowledge base for docs/guidelines
-        - webSearch: Search the internet via DuckDuckGo (no API key needed)
-        - readWebPage: Fetch and read the text content of a web URL
+        - External MCP Tools: You may have access to external tools dynamically loaded via MCP (e.g., brave_web_search, github_repo_management). Use these when external context or web data is needed.
         
         ── WHEN TO USE TOOLS vs WHEN TO JUST TALK ─────────────────────────────
         
@@ -110,10 +97,6 @@ public class AgentLoopService {
         For conversational replies, respond naturally without the task-complete marker.
         """;
 
-    /**
-     * Short conversational messages that should never trigger tool execution.
-     * Checked before running the full agentic loop.
-     */
     private static final Set<String> CONVERSATIONAL_PREFIXES = Set.of(
         "hi", "hello", "hey", "howdy", "greetings", "good morning", "good evening",
         "good afternoon", "what can you do", "who are you", "what are you",
@@ -121,16 +104,14 @@ public class AgentLoopService {
         "help", "what is your name"
     );
 
-    /** Returns true when the message is clearly conversational (no tools needed). */
     private boolean isConversational(String message) {
         if (message == null) return false;
         String normalized = message.trim().toLowerCase().replaceAll("[^a-z0-9 ]", "");
-        // Very short messages or exact prefix match
         if (normalized.length() <= 12) return true;
         return CONVERSATIONAL_PREFIXES.stream().anyMatch(normalized::startsWith);
     }
 
-    private final ChatClient chatClientTemplate;  // blueprint — we build per-request
+    private final ChatClient chatClientTemplate;
     private final ChatClient.Builder chatClientBuilder;
     private final WorkspaceManager workspaceManager;
     private final SessionMemoryService sessionMemory;
@@ -147,19 +128,17 @@ public class AgentLoopService {
                             BuildVerificationTool buildVerificationTool,
                             SearchCodebaseTool searchCodebaseTool,
                             KnowledgeRetrievalTool knowledgeRetrievalTool,
-                            WebSearchTool webSearchTool,
-                            WebPageReaderTool webPageReaderTool,
                             WorkspaceManager workspaceManager,
                             SessionMemoryService sessionMemory,
-                            ProjectMemoryService projectMemory) {
+                            ProjectMemoryService projectMemory,
+                            ObjectProvider<SyncMcpToolCallbackProvider> mcpProvider) {
 
         this.chatClientBuilder = chatClientBuilder;
         this.workspaceManager = workspaceManager;
         this.sessionMemory = sessionMemory;
         this.projectMemory = projectMemory;
 
-        this.chatClientTemplate = chatClientBuilder
-            .defaultTools(
+        List<Object> allTools = new ArrayList<>(List.of(
                 fileReadTool,
                 fileWriteTool,
                 fileEditTool,
@@ -169,34 +148,24 @@ public class AgentLoopService {
                 commandExecutionTool,
                 buildVerificationTool,
                 searchCodebaseTool,
-                knowledgeRetrievalTool,
-                webSearchTool,
-                webPageReaderTool
-            )
+                knowledgeRetrievalTool
+        ));
+
+        // Dynamically inject MCP tool callbacks if the provider is active
+        mcpProvider.ifAvailable(provider -> {
+            log.info("MCP Tool Callback Provider found. Merging dynamic capabilities.");
+            allTools.addAll(List.of(provider.getToolCallbacks()));
+        });
+
+        this.chatClientTemplate = chatClientBuilder
+            .defaultTools(allTools.toArray())
             .build();
     }
 
-    // ─── Public API ───────────────────────────────────────────────────────────
-
-    /**
-     * Execute an agentic task — synchronous, returns when complete.
-     *
-     * FLOW:
-     *   1. Recall project memories relevant to this task (PgVector)
-     *   2. Load recent session conversation history
-     *   3. Build an enhanced system prompt with both memory types injected
-     *   4. Run the Spring AI tool-calling loop
-     *   5. Store the completed task in project memory
-     *   6. Append user + assistant messages to session window
-     *
-     * @param userMessage         What the user wants done
-     * @param conversationHistory Manually-passed history (optional — session memory is used automatically)
-     */
     public AgentResponse execute(String userMessage, List<AgentMessage> conversationHistory) {
         log.info("▶ Agent task: {}", userMessage.substring(0, Math.min(120, userMessage.length())));
         long start = System.currentTimeMillis();
 
-        // ── Step 1: Recall project-specific memories ─────────────────────────
         String projectContext = "(no workspace attached)";
         String workspacePath = null;
 
@@ -207,11 +176,8 @@ public class AgentLoopService {
             log.debug("Injecting {} project memories into prompt", memories.size());
         }
 
-        // ── Step 2: Build session history context ─────────────────────────────
-        // Use manually-passed history first, fall back to session memory
         String sessionContext;
         if (!conversationHistory.isEmpty()) {
-            // Caller passed explicit history (e.g., from UI state)
             StringBuilder sb = new StringBuilder();
             conversationHistory.forEach(m ->
                 sb.append("[").append(m.role().toUpperCase()).append("]: ")
@@ -219,29 +185,23 @@ public class AgentLoopService {
             );
             sessionContext = sb.toString();
         } else {
-            // Use the service's own session window (most common path)
             sessionContext = sessionMemory.getFormattedHistory(10);
             if (sessionContext.isBlank()) {
                 sessionContext = "(start of conversation)";
             }
         }
 
-        // ── Step 3: Build the memory-enhanced system prompt ───────────────────
         String enhancedSystemPrompt = SYSTEM_PROMPT_TEMPLATE.formatted(
             projectContext,
             sessionContext
         );
 
-        // ── Step 4: Record user message in session window ─────────────────────
         sessionMemory.addUserMessage(userMessage);
 
-        // ── Step 5: Run the agentic loop ──────────────────────────────────────
         try {
-            // For purely conversational messages, skip tool-calling to avoid
-            // the LLM calling listDirectory() before every single reply.
             ChatClient client = isConversational(userMessage)
-                ? chatClientBuilder.build()  // no tools — plain conversation
-                : chatClientTemplate;        // full tool-calling agent
+                ? chatClientBuilder.build()
+                : chatClientTemplate;
 
             String response = client.prompt()
                 .system(enhancedSystemPrompt)
@@ -252,7 +212,6 @@ public class AgentLoopService {
             long elapsed = System.currentTimeMillis() - start;
             log.info("✅ Agent task completed in {}ms", elapsed);
 
-            // ── Step 6: Store what was accomplished ───────────────────────────
             sessionMemory.addAssistantMessage(response);
 
             if (workspacePath != null && !isConversational(userMessage)) {
@@ -270,18 +229,10 @@ public class AgentLoopService {
         }
     }
 
-    /**
-     * Stream an agentic task response for real-time SSE delivery.
-     *
-     * NOTE: Memory recall and injection happen BEFORE streaming starts.
-     * Tool calls during streaming still execute synchronously.
-     * Only the final text answer streams token-by-token.
-     */
     public Flux<String> stream(String userMessage) {
         log.info("▶ Stream agent task: {}",
             userMessage.substring(0, Math.min(80, userMessage.length())));
 
-        // Build memory context same as execute()
         String projectContext = "(no workspace attached)";
         if (workspaceManager.isWorkspaceAttached()) {
             String wp = workspaceManager.getActiveWorkspace().toString();
@@ -302,27 +253,14 @@ public class AgentLoopService {
             .content()
             .doOnComplete(() -> {
                 log.info("✅ Streaming task completed");
-                // Note: we can't easily capture the full streamed response here.
-                // Phase 9 (UI) will accumulate chunks and call a save-memory endpoint.
             })
             .doOnError(e -> log.error("❌ Streaming task error: {}", e.getMessage()));
     }
 
-    /**
-     * Clear the current session memory (e.g., user clicks "New Conversation").
-     * Project memory (PgVector) is NOT cleared — it persists across sessions.
-     */
     public void clearSession() {
         sessionMemory.clear();
         log.info("Session memory cleared by user request");
     }
 
-    /**
-     * The agent's response envelope.
-     *
-     * @param content  The LLM's final text response
-     * @param success  false only on infrastructure errors (LLM unreachable, etc.)
-     * @param error    Human-readable error, null when success=true
-     */
     public record AgentResponse(String content, boolean success, String error) {}
 }
